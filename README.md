@@ -1,9 +1,30 @@
-# Termux application
+# 🛡️ NasTech Guardian
 
-[![Build status](https://github.com/termux/termux-app/workflows/Build/badge.svg)](https://github.com/termux/termux-app/actions)
-[![Testing status](https://github.com/termux/termux-app/workflows/Unit%20tests/badge.svg)](https://github.com/termux/termux-app/actions)
-[![Join the chat at https://gitter.im/termux/termux](https://badges.gitter.im/termux/termux.svg)](https://gitter.im/termux/termux)
-[![Join the Termux discord server](https://img.shields.io/discord/641256914684084234.svg?label=&logo=discord&logoColor=ffffff&color=5865F2)](https://discord.gg/HXpF69X)
+> **Developed by Nsamba Naswif Cohen**
+
+[![Guardian CI](https://github.com/nastech-ai/NasGuardian/actions/workflows/nasguardian_guardian.yml/badge.svg)](https://github.com/nastech-ai/NasGuardian/actions)
+[![Audit](https://github.com/nastech-ai/NasGuardian/actions/workflows/nasguardian_audit.yml/badge.svg)](https://github.com/nastech-ai/NasGuardian/actions)
+[![Tests](https://github.com/nastech-ai/NasGuardian/actions/workflows/nasguardian_tests.yml/badge.svg)](https://github.com/nastech-ai/NasGuardian/actions)
+
+**Multi-agent CI/CD orchestration system for NasTech AI Terminal (Termux-based Android app)**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nastech-ai/NasGuardian/main/install.sh | bash
+```
+
+---
+
+## Features
+
+- 🤖 **AI Chat** — Groq → Gemini → OpenRouter fallback chain
+- 📊 **Pipeline** — Build, test, repair, release orchestration
+- 🔍 **Multi-Repo Manager** — Audit, fix plans, dashboard across repos
+- 🔑 **API Key Management** — `/setkey /apikeys /testkeys` via Telegram
+- 📸 **Error Screenshots** — `/errors` full job/step breakdown · `/errorshot` sends `.txt` report
+- 🔧 **Auto-Fix on Approve** — `/autofix` diagnoses failure → AI fix plan → tap ✅ Approve Fix → applied
+- 🔔 **Notification Toggles** — Per-type ON/OFF (build, failures, PR, release, security, daily)
+- 📱 **Termux/Android** — One-line installer, ZIP bundle, boot config
+- 🎹 **100-Button Keyboard** — 10 categories, instant command access
 [![Termux library releases at Jitpack](https://jitpack.io/v/termux/termux-app.svg)](https://jitpack.io/#termux/termux-app)
 
 
