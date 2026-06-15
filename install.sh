@@ -16,8 +16,9 @@ B='\033[0;34m'; C='\033[0;36m'; N='\033[0m'; BOLD='\033[1m'
 banner() {
   echo ""
   echo -e "${BOLD}${C}╔══════════════════════════════════════════════════════╗${N}"
-  echo -e "${BOLD}${C}║  🛡️  NasTech Guardian — Installer                    ║${N}"
+  echo -e "${BOLD}${C}║  🛡️  NasTech Guardian — Installer              v3.0  ║${N}"
   echo -e "${BOLD}${C}║  Multi-agent CI/CD + Telegram Bot for Android/Termux ║${N}"
+  echo -e "${BOLD}${C}║  Developed by Nsamba Naswif Cohen                    ║${N}"
   echo -e "${BOLD}${C}╚══════════════════════════════════════════════════════╝${N}"
   echo ""
 }
