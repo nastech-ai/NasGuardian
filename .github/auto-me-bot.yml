@@ -1,0 +1,38 @@
+# NasTech Guardian — auto-me-bot configuration
+# App: https://github.com/apps/auto-me-bot
+# Docs: https://auto-me-bot.figenblat.com
+---
+pr:
+  lifecycleLabels:
+    ignoreDrafts: true
+    labels:
+      reviewRequired:       "status: needs review"
+      changesRequested:     "status: changes requested"
+      moreReviewsRequired:  "status: needs more reviews"
+      reviewStarted:        "status: review in progress"
+      approved:             "status: approved"
+      merged:               "status: merged"
+
+  conventionalTitle:
+    rules:
+      'header-max-length': [2, 'always', 80]
+
+  conventionalCommits:
+    rules:
+      'body-max-line-length': [2, 'always', 150]
+
+  tasksList:
+
+  signedCommits:
+    ignore:
+      users:
+        - 'dependabot[bot]'
+        - 'renovate[bot]'
+        - 'nastech-guardian[bot]'
+        - 'allcontributors[bot]'
+
+  autoApprove:
+    allBots: false
+    users:
+      - 'dependabot'
+      - 'renovate[bot]'
