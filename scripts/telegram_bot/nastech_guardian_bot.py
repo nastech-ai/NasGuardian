@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """
 NasTech Guardian Telegram Bot v3.0
-Multi-repo + full audit + fix-plan + TeleBotList features:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Developed by Nsamba Naswif Cohen
+  NasTech AI Terminal — Multi-agent CI/CD Orchestrator
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Features:
   - AI chat with session history (Groq → Gemini → OpenRouter)
   - /ask /explain /review /fix_error /run /ocr /summarize /translate
   - Multi-repo: /repo add|list|switch|audit|remove, /dashboard, /audit, /fixplan
   - Full pre-join audit: secrets, workflows, builds, issues, security
   - Per-repo fix plans with prioritised step-by-step instructions
-  - 50+ CI/CD commands, daily digest, OCR, group management
+  - 100-button reply keyboard across 9 categories
+  - Full error screenshots: /errors /errorshot — job/step breakdown + log file
+  - 55+ CI/CD commands, daily digest, OCR, group management
 
 Install:  pip install python-telegram-bot apscheduler requests pillow
 Run:      python3 scripts/telegram_bot/nastech_guardian_bot.py
@@ -74,7 +80,8 @@ GEMINI_KEY   = os.environ.get("GEMINI_API_KEY", "")
 OR_KEY       = os.environ.get("OPENROUTER_API_KEY", "")
 GITHUB_REPO  = os.environ.get("GITHUB_REPO", "nastech-ai/NasTerminal")
 GUARDIAN_WF  = "nastech_guardian.yml"
-BOT_VERSION  = "2.0.0"
+BOT_VERSION  = "3.0.0"
+BRAND        = "🛡️ NasTech Guardian  |  Developed by Nsamba Naswif Cohen"
 
 # Whitelist: comma-separated chat IDs. Empty = allow all.
 _wl_raw = os.environ.get("TELEGRAM_CHAT_ID", "") or os.environ.get("ALLOWED_CHAT_IDS", "")
@@ -95,12 +102,23 @@ logging.basicConfig(
 logger = logging.getLogger("NasTechGuardian")
 
 # ── Per-chat session store ──────────────────────────────────────────
-sessions: dict = defaultdict(lambda: {
-    "history":     [],   # AI conversation history
-    "repo":        GITHUB_REPO,
-    "ai_mode":     True,
-    "last_active": 0.0,
-})
+def _default_session():
+    return {
+        "history":     [],
+        "repo":        GITHUB_REPO,
+        "ai_mode":     True,
+        "last_active": 0.0,
+        "notif": {
+            "build":    True,
+            "failures": True,
+            "security": True,
+            "pr":       True,
+            "release":  True,
+            "daily":    False,
+        },
+    }
+
+sessions: dict = defaultdict(_default_session)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -339,7 +357,7 @@ _KB_MAIN = [
     ["🤖 AI Chat",       "📊 Pipeline",      "🔍 Repos"],
     ["🛠️ Tools",         "🔑 API Keys",      "📱 Android"],
     ["🚀 Workflows",     "📋 Reports",       "🔒 Security"],
-    ["📅 Daily Digest",  "⚙️ Settings",      "❓ Help"],
+    ["🔔 Notifications", "⚙️ Settings",      "❓ Help"],
 ]
 
 _KB_AI = [
@@ -428,6 +446,15 @@ _KB_SETTINGS = [
     ["💾 Backup Info",     "🧠 Bot Memory",     "📋 All Commands"],
     ["🔄 Restart Bot",     "⚙️ Preferences",   "📡 Connection Test"],
     ["🏠 Main Menu"],
+]
+
+_KB_NOTIFICATIONS = [
+    ["🔔 All Notif ON",     "🔕 All Notif OFF",    "📊 Notif Status"],
+    ["🔔 Build ON",         "🔕 Build OFF",         "🔔 Failures ON"],
+    ["🔕 Failures OFF",     "🔔 PR Alerts ON",      "🔕 PR Alerts OFF"],
+    ["🔔 Release ON",       "🔕 Release OFF",       "🔔 Security ON"],
+    ["🔕 Security OFF",     "📅 Daily ON",          "🔕 Daily OFF"],
+    ["📋 Digest Now",       "📤 Error Screenshot",  "🏠 Main Menu"],
 ]
 
 # ── Label → keyboard mapping ──────────────────────────────────────────
@@ -593,6 +620,28 @@ _BUTTON_COMMANDS: dict = {
     "⚙️ Preferences":       ("/memory",       None),
     "📡 Connection Test":   ("/testkeys",     None),
     "🔄 Reload Keys":       ("/apikeys",      None),
+    # Notifications toggles
+    "🔔 All Notif ON":      ("/notifon",      "all"),
+    "🔕 All Notif OFF":     ("/notifoff",     "all"),
+    "📊 Notif Status":      ("/notif",        None),
+    "🔔 Build ON":          ("/notifon",      "build"),
+    "🔕 Build OFF":         ("/notifoff",     "build"),
+    "🔔 Failures ON":       ("/notifon",      "failures"),
+    "🔕 Failures OFF":      ("/notifoff",     "failures"),
+    "🔔 PR Alerts ON":      ("/notifon",      "pr"),
+    "🔕 PR Alerts OFF":     ("/notifoff",     "pr"),
+    "🔔 Release ON":        ("/notifon",      "release"),
+    "🔕 Release OFF":       ("/notifoff",     "release"),
+    "🔔 Security ON":       ("/notifon",      "security"),
+    "🔕 Security OFF":      ("/notifoff",     "security"),
+    "📅 Daily ON":          ("/notifon",      "daily"),
+    "🔕 Daily OFF":         ("/notifoff",     "daily"),
+    "📋 Digest Now":        ("/daily",        None),
+    "📤 Error Screenshot":  ("/errorshot",    None),
+    # Auto-fix
+    "🔧 Auto Fix":          ("/autofix",      None),
+    "✅ Approve Fix":       ("/approvefix",   None),
+    "❌ Cancel Fix":        ("/cancelfix",    None),
 }
 
 def make_keyboard(rows: list) -> ReplyKeyboardMarkup:
@@ -607,31 +656,33 @@ def make_keyboard(rows: list) -> ReplyKeyboardMarkup:
 
 # Pre-build all keyboards
 _KEYBOARDS_BUILT: dict = {
-    "main":      make_keyboard(_KB_MAIN),
-    "ai":        make_keyboard(_KB_AI),
-    "pipeline":  make_keyboard(_KB_PIPELINE),
-    "repos":     make_keyboard(_KB_REPOS),
-    "tools":     make_keyboard(_KB_TOOLS),
-    "keys":      make_keyboard(_KB_KEYS),
-    "android":   make_keyboard(_KB_ANDROID),
-    "workflows": make_keyboard(_KB_WORKFLOWS),
-    "reports":   make_keyboard(_KB_REPORTS),
-    "security":  make_keyboard(_KB_SECURITY),
-    "settings":  make_keyboard(_KB_SETTINGS),
+    "main":          make_keyboard(_KB_MAIN),
+    "ai":            make_keyboard(_KB_AI),
+    "pipeline":      make_keyboard(_KB_PIPELINE),
+    "repos":         make_keyboard(_KB_REPOS),
+    "tools":         make_keyboard(_KB_TOOLS),
+    "keys":          make_keyboard(_KB_KEYS),
+    "android":       make_keyboard(_KB_ANDROID),
+    "workflows":     make_keyboard(_KB_WORKFLOWS),
+    "reports":       make_keyboard(_KB_REPORTS),
+    "security":      make_keyboard(_KB_SECURITY),
+    "settings":      make_keyboard(_KB_SETTINGS),
+    "notifications": make_keyboard(_KB_NOTIFICATIONS),
 }
 
 _CATEGORY_KB_MAP: dict = {
-    "🤖 AI Chat":      "ai",
-    "📊 Pipeline":     "pipeline",
-    "🔍 Repos":        "repos",
-    "🛠️ Tools":        "tools",
-    "🔑 API Keys":     "keys",
-    "📱 Android":      "android",
-    "🚀 Workflows":    "workflows",
-    "📋 Reports":      "reports",
-    "🔒 Security":     "security",
-    "⚙️ Settings":     "settings",
-    "🏠 Main Menu":    "main",
+    "🤖 AI Chat":       "ai",
+    "📊 Pipeline":      "pipeline",
+    "🔍 Repos":         "repos",
+    "🛠️ Tools":         "tools",
+    "🔑 API Keys":      "keys",
+    "📱 Android":       "android",
+    "🚀 Workflows":     "workflows",
+    "📋 Reports":       "reports",
+    "🔒 Security":      "security",
+    "⚙️ Settings":      "settings",
+    "🔔 Notifications": "notifications",
+    "🏠 Main Menu":     "main",
 }
 
 _CATEGORY_LABELS: dict = {
@@ -643,9 +694,10 @@ _CATEGORY_LABELS: dict = {
     "📱 Android":      "📱 Android / Termux",
     "🚀 Workflows":    "🚀 GitHub Workflows",
     "📋 Reports":      "📋 Reports & Info",
-    "🔒 Security":     "🔒 Security & Audit",
-    "⚙️ Settings":     "⚙️ Settings",
-    "🏠 Main Menu":    "🏠 Main Menu",
+    "🔒 Security":      "🔒 Security & Audit",
+    "⚙️ Settings":      "⚙️ Settings",
+    "🔔 Notifications": "🔔 Notifications — ON/OFF Toggles",
+    "🏠 Main Menu":     "🏠 Main Menu",
 }
 
 async def show_keyboard(u: Update, name: str = "main", text: str = None):
@@ -669,7 +721,8 @@ async def cmd_start(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Repo: <code>{sessions[cid]['repo']}</code>\n\n"
         "Your AI DevOps assistant + CI/CD orchestrator.\n\n"
         "💡 <b>Tap any button below</b> — or type a message to chat with AI.\n"
-        "Use /menu to switch keyboard categories.",
+        "Use /menu to switch keyboard categories.\n\n"
+        f"<i>Developed by Nsamba Naswif Cohen</i>",
         reply_markup=_KEYBOARDS_BUILT["main"],
         parse_mode=ParseMode.HTML
     )
@@ -741,7 +794,8 @@ async def cmd_help(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "  /services — service health\n"
         "  /memory — bot state\n"
         "  /backup — backup info\n\n"
-        "<i>Or just type a message to chat with AI!</i>",
+        "<i>Or just type a message to chat with AI!</i>\n\n"
+        f"<i>{BRAND}</i>",
         parse_mode=ParseMode.HTML
     )
 
@@ -1538,25 +1592,158 @@ async def cmd_logs(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         disable_web_page_preview=True)
 
 
+def _fetch_run_jobs(repo: str, run_id: int) -> list:
+    """Fetch all jobs for a workflow run."""
+    owner, rname = repo.split("/")
+    r = gh("GET", f"/repos/{owner}/{rname}/actions/runs/{run_id}/jobs", repo=repo)
+    return r.get("jobs", [])
+
+
+def _fmt_job_steps(job: dict) -> str:
+    """Format a job's steps as ✅/❌ lines."""
+    lines = []
+    j_conc = job.get("conclusion","?")
+    j_icon = {"success":"✅","failure":"❌","cancelled":"⏹️","skipped":"⏭️"}.get(j_conc,"🔄")
+    lines.append(f"{j_icon} <b>{esc(job.get('name','?'))}</b>")
+    for step in job.get("steps", []):
+        conc = step.get("conclusion") or step.get("status","?")
+        icon = {"success":"✅","failure":"❌","cancelled":"⏹️","skipped":"⏭️"}.get(conc,"🔄")
+        num  = step.get("number","")
+        lines.append(f"  {icon} Step {num}: {esc(step.get('name','?'))}")
+    return "\n".join(lines)
+
+
 async def cmd_errors(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show recent failures with full job + step breakdown (screenshot-style)."""
     if not authorized(u): return await deny(u)
     cid  = str(u.effective_chat.id)
     repo = sessions[cid]["repo"]
-    msg  = await u.message.reply_text("⏳ Checking for failures…")
-    runs = wf_runs(limit=15, repo=repo)
+    msg  = await u.message.reply_text("⏳ Fetching failures + job details…")
+    runs = wf_runs(limit=20, repo=repo)
     failed = [r for r in runs if r.get("conclusion") == "failure"]
     if not failed:
-        await msg.edit_text("✅ No recent failures!")
+        await msg.edit_text("✅ <b>No recent failures!</b>\nAll workflow runs passed.",
+                            parse_mode=ParseMode.HTML)
         return
-    lines = [f"❌ <b>Recent Failures ({len(failed)})</b>\n"]
-    for r in failed[:5]:
-        sha  = r.get("head_sha","")[:7]
-        name = r.get("name","?")[:30]
-        url  = r.get("html_url","")
-        ts   = r.get("created_at","")[:16]
-        lines.append(f"❌ <code>{sha}</code> {esc(name)} ({ts})\n<a href='{url}'>View</a>")
-    await msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML,
+
+    owner, rname = repo.split("/")
+    blocks = [f"❌ <b>Failure Report — {esc(rname)} ({len(failed)} failed)</b>\n"]
+
+    for r in failed[:3]:
+        run_id = r.get("id")
+        sha    = r.get("head_sha","")[:7]
+        name   = r.get("name","?")
+        branch = r.get("head_branch","?")
+        ts     = r.get("created_at","")[:16].replace("T"," ")
+        url    = r.get("html_url","")
+        msg_hd = (r.get("head_commit") or {}).get("message","")[:60]
+
+        blocks.append(
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔴 <b>{esc(name)}</b>\n"
+            f"📅 {ts}  |  🌿 <code>{esc(branch)}</code>\n"
+            f"🔗 <code>{sha}</code> — {esc(msg_hd)}\n"
+        )
+
+        jobs = _fetch_run_jobs(repo, run_id)
+        if jobs:
+            for job in jobs:
+                blocks.append(_fmt_job_steps(job))
+        else:
+            blocks.append("  ⚠️ Job details unavailable (no GitHub token)")
+
+        blocks.append(f"\n📎 <a href='{url}'>View full log on GitHub</a>")
+
+    blocks.append(f"\n<i>{BRAND}</i>\n💡 Use /errorshot to download full log as a file")
+    text = "\n".join(blocks)
+    await msg.edit_text(truncate(text, 4000), parse_mode=ParseMode.HTML,
                         disable_web_page_preview=True)
+
+
+async def cmd_errorshot(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Download the latest failed run's full job/step report as a .txt file."""
+    if not authorized(u): return await deny(u)
+    cid  = str(u.effective_chat.id)
+    repo = sessions[cid]["repo"]
+    owner, rname = repo.split("/")
+    msg  = await u.message.reply_text("📸 Building error screenshot…")
+
+    runs   = wf_runs(limit=20, repo=repo)
+    failed = [r for r in runs if r.get("conclusion") == "failure"]
+    if not failed:
+        await msg.edit_text("✅ No failures found — all runs passed!")
+        return
+
+    lines = [
+        "=" * 60,
+        "  NasTech Guardian — Error Screenshot",
+        f"  Developed by Nsamba Naswif Cohen",
+        f"  Repo: {repo}",
+        f"  Generated: {__import__('datetime').datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
+        "=" * 60,
+        "",
+    ]
+
+    for idx, r in enumerate(failed[:5], 1):
+        run_id = r.get("id")
+        sha    = r.get("head_sha","")[:7]
+        name   = r.get("name","?")
+        branch = r.get("head_branch","?")
+        ts     = r.get("created_at","")[:16].replace("T"," ")
+        url    = r.get("html_url","")
+        actor  = r.get("triggering_actor",{}).get("login","?") if r.get("triggering_actor") else "?"
+        commit_msg = (r.get("head_commit") or {}).get("message","")[:80]
+        event  = r.get("event","?")
+
+        lines += [
+            f"[FAILURE #{idx}]",
+            f"  Workflow : {name}",
+            f"  Branch   : {branch}",
+            f"  Commit   : {sha} — {commit_msg}",
+            f"  Triggered: {event} by {actor}",
+            f"  Time     : {ts}",
+            f"  URL      : {url}",
+            "",
+        ]
+
+        jobs = _fetch_run_jobs(repo, run_id)
+        if jobs:
+            for job in jobs:
+                j_conc = job.get("conclusion","?")
+                j_icon = "PASS" if j_conc == "success" else "FAIL" if j_conc == "failure" else j_conc.upper()
+                lines.append(f"  [{j_icon}] Job: {job.get('name','?')}")
+                for step in job.get("steps",[]):
+                    s_conc = step.get("conclusion") or step.get("status","?")
+                    s_icon = " OK " if s_conc == "success" else "FAIL" if s_conc == "failure" else "SKIP"
+                    lines.append(f"         [{s_icon}] Step {step.get('number','')}: {step.get('name','?')}")
+                lines.append("")
+        else:
+            lines += ["  (Job details require GITHUB_TOKEN secret)", ""]
+
+        lines += ["-" * 60, ""]
+
+    lines += [
+        "",
+        "=" * 60,
+        f"  {BRAND}",
+        "  github.com/nastech-ai/NasGuardian",
+        "=" * 60,
+    ]
+
+    report = "\n".join(lines)
+    fname  = f"nasguardian_errors_{__import__('datetime').datetime.utcnow().strftime('%Y%m%d_%H%M')}.txt"
+
+    await msg.delete()
+    await u.message.reply_document(
+        document=report.encode("utf-8"),
+        filename=fname,
+        caption=(
+            f"📸 <b>Error Screenshot — {esc(rname)}</b>\n"
+            f"❌ {len(failed)} failed run(s) • {len(failed[:5])} shown\n"
+            f"<i>{BRAND}</i>"
+        ),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def cmd_dependencies(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2160,6 +2347,10 @@ async def handle_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "/scanall":      cmd_scanall,      "/repo":         cmd_repo,
             "/daily":        cmd_daily,        "/subscribe":    cmd_daily_subscribe,
             "/unsubscribe":  cmd_unsubscribe,  "/help":         cmd_help,
+            "/notif":        cmd_notif,        "/notifon":      cmd_notifon,
+            "/notifoff":     cmd_notifoff,     "/autofix":      cmd_autofix,
+            "/approvefix":   cmd_approvefix,   "/cancelfix":    cmd_cancelfix,
+            "/errorshot":    cmd_errorshot,
             "/backup":       cmd_backup,       "/apikeys":      cmd_apikeys,
             "/testkeys":     cmd_testkeys,
         }
@@ -2229,6 +2420,7 @@ async def cmd_daily_subscribe(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(u): return await deny(u)
     cid = str(u.effective_chat.id)
     _scheduled_chats.add(cid)
+    sessions[cid]["notif"]["daily"] = True
     await u.message.reply_text(
         "✅ <b>Daily Digest Subscribed!</b>\n"
         "You'll receive an AI digest every day at 09:00 UTC.\n"
@@ -2242,7 +2434,281 @@ async def cmd_unsubscribe(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(u): return await deny(u)
     cid = str(u.effective_chat.id)
     _scheduled_chats.discard(cid)
+    sessions[cid]["notif"]["daily"] = False
     await u.message.reply_text("🔕 Daily digest unsubscribed.")
+
+
+# ── Notification toggle commands ──────────────────────────────────────
+
+_NOTIF_LABELS = {
+    "build":    "🏗️ Build Alerts",
+    "failures": "❌ Failure Alerts",
+    "security": "🔒 Security Alerts",
+    "pr":       "🔀 PR Alerts",
+    "release":  "🚀 Release Alerts",
+    "daily":    "📅 Daily Digest",
+}
+
+async def cmd_notif(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show current notification preferences."""
+    if not authorized(u): return await deny(u)
+    cid = str(u.effective_chat.id)
+    prefs = sessions[cid]["notif"]
+    lines = ["🔔 <b>Notification Settings</b>\n"]
+    for key, label in _NOTIF_LABELS.items():
+        state = prefs.get(key, True)
+        icon  = "🔔 ON " if state else "🔕 OFF"
+        lines.append(f"  {icon}  {label}")
+    lines += [
+        "",
+        "Use the Notifications keyboard to toggle each type ON or OFF.",
+        f"\n<i>{BRAND}</i>",
+    ]
+    await u.message.reply_text(
+        "\n".join(lines),
+        reply_markup=_KEYBOARDS_BUILT["notifications"],
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_notifon(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Turn a notification type ON.  /notifon [type|all]"""
+    if not authorized(u): return await deny(u)
+    cid  = str(u.effective_chat.id)
+    kind = (ctx.args[0].lower() if ctx.args else "all")
+    prefs = sessions[cid]["notif"]
+    if kind == "all":
+        for k in prefs: prefs[k] = True
+        if cid not in _scheduled_chats: _scheduled_chats.add(cid)
+        await u.message.reply_text(
+            "🔔 <b>All notifications turned ON!</b>",
+            reply_markup=_KEYBOARDS_BUILT["notifications"],
+            parse_mode=ParseMode.HTML,
+        )
+    elif kind in prefs:
+        prefs[kind] = True
+        if kind == "daily": _scheduled_chats.add(cid)
+        label = _NOTIF_LABELS.get(kind, kind)
+        await u.message.reply_text(
+            f"🔔 <b>{label} — ON</b>",
+            reply_markup=_KEYBOARDS_BUILT["notifications"],
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await u.message.reply_text(
+            f"❓ Unknown type <code>{esc(kind)}</code>. "
+            f"Valid: {', '.join(_NOTIF_LABELS.keys())}",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+async def cmd_notifoff(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Turn a notification type OFF.  /notifoff [type|all]"""
+    if not authorized(u): return await deny(u)
+    cid  = str(u.effective_chat.id)
+    kind = (ctx.args[0].lower() if ctx.args else "all")
+    prefs = sessions[cid]["notif"]
+    if kind == "all":
+        for k in prefs: prefs[k] = False
+        _scheduled_chats.discard(cid)
+        await u.message.reply_text(
+            "🔕 <b>All notifications turned OFF.</b>",
+            reply_markup=_KEYBOARDS_BUILT["notifications"],
+            parse_mode=ParseMode.HTML,
+        )
+    elif kind in prefs:
+        prefs[kind] = False
+        if kind == "daily": _scheduled_chats.discard(cid)
+        label = _NOTIF_LABELS.get(kind, kind)
+        await u.message.reply_text(
+            f"🔕 <b>{label} — OFF</b>",
+            reply_markup=_KEYBOARDS_BUILT["notifications"],
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await u.message.reply_text(
+            f"❓ Unknown type <code>{esc(kind)}</code>. "
+            f"Valid: {', '.join(_NOTIF_LABELS.keys())}",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+# ── Auto-fix when approved ────────────────────────────────────────────
+
+_APPROVE_KB = make_keyboard([
+    ["✅ Approve Fix", "❌ Cancel Fix"],
+    ["🏠 Main Menu"],
+])
+
+
+async def cmd_autofix(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Analyse the latest failure, propose a fix, wait for /approvefix."""
+    if not authorized(u): return await deny(u)
+    cid   = str(u.effective_chat.id)
+    repo  = sessions[cid]["repo"]
+    owner, rname = repo.split("/")
+
+    msg = await u.message.reply_text("🔍 Scanning latest failures for auto-fix…")
+
+    runs   = wf_runs(limit=20, repo=repo)
+    failed = [r for r in runs if r.get("conclusion") == "failure"]
+    if not failed:
+        await msg.edit_text("✅ No recent failures — nothing to fix!")
+        return
+
+    run    = failed[0]
+    run_id = run["id"]
+    wf_name = run.get("name", "?")
+    branch  = run.get("head_branch", "main")
+    sha     = run.get("head_sha","")[:7]
+    url     = run.get("html_url","")
+    commit_msg = (run.get("head_commit") or {}).get("message","")[:80]
+
+    # Build failure context for AI
+    jobs     = _fetch_run_jobs(repo, run_id)
+    ctx_lines = [
+        f"Repo: {repo}",
+        f"Workflow: {wf_name}",
+        f"Branch: {branch}",
+        f"Commit: {sha} — {commit_msg}",
+        "Failed jobs and steps:",
+    ]
+    for job in jobs:
+        if job.get("conclusion") == "failure":
+            ctx_lines.append(f"  Job FAILED: {job.get('name','?')}")
+            for step in job.get("steps", []):
+                if step.get("conclusion") == "failure":
+                    ctx_lines.append(f"    Step FAILED: {step.get('name','?')}")
+
+    error_ctx = "\n".join(ctx_lines)
+    prompt = (
+        f"You are a CI/CD expert for the NasTech Guardian project.\n"
+        f"Analyse this workflow failure and give a SHORT, DIRECT fix plan (max 5 steps).\n"
+        f"End with: FIX_COMMAND: <one shell command or workflow trigger to apply the fix>\n\n"
+        f"{error_ctx}"
+    )
+
+    await msg.edit_text("🤖 Asking AI to diagnose and plan the fix…")
+    result = ai_chat(prompt, [], repo)
+    fix_text = result.get("text", "Could not generate fix plan.")
+
+    # Extract FIX_COMMAND if AI provided one
+    fix_cmd = None
+    for line in fix_text.splitlines():
+        if line.strip().startswith("FIX_COMMAND:"):
+            fix_cmd = line.split("FIX_COMMAND:", 1)[1].strip()
+            break
+
+    # Store pending fix in session
+    sessions[cid]["pending_fix"] = {
+        "run_id":    run_id,
+        "repo":      repo,
+        "wf_name":   wf_name,
+        "branch":    branch,
+        "sha":       sha,
+        "url":       url,
+        "fix_cmd":   fix_cmd,
+        "fix_text":  fix_text,
+    }
+
+    proposal = (
+        f"🔧 <b>Auto-Fix Proposal</b>\n\n"
+        f"❌ <b>Failed:</b> {esc(wf_name)} on <code>{esc(branch)}</code>\n"
+        f"🔗 Commit <code>{sha}</code> — {esc(commit_msg)}\n\n"
+        f"<b>AI Fix Plan:</b>\n{esc(fix_text[:1800])}\n\n"
+        + (f"⚡ <b>Auto-apply command:</b>\n<code>{esc(fix_cmd)}</code>\n\n"
+           if fix_cmd else "")
+        + f"👇 <b>Tap ✅ Approve Fix to apply, or ❌ Cancel Fix to dismiss.</b>\n\n"
+        f"<i>{BRAND}</i>"
+    )
+    await msg.edit_text(
+        truncate(proposal, 4000),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=_APPROVE_KB,
+    )
+
+
+async def cmd_approvefix(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Apply the pending auto-fix that was proposed by /autofix."""
+    if not authorized(u): return await deny(u)
+    cid  = str(u.effective_chat.id)
+    fix  = sessions[cid].get("pending_fix")
+
+    if not fix:
+        await u.message.reply_text(
+            "⚠️ No pending fix. Run /autofix first to generate a fix proposal.",
+            reply_markup=_KEYBOARDS_BUILT["main"],
+        )
+        return
+
+    repo    = fix["repo"]
+    wf_name = fix["wf_name"]
+    branch  = fix["branch"]
+    sha     = fix["sha"]
+    fix_cmd = fix.get("fix_cmd", "")
+    fix_text = fix.get("fix_text","")
+
+    msg = await u.message.reply_text("⚙️ Applying fix…")
+    steps_done = []
+
+    # Step 1 — Trigger the repair workflow
+    repaired = trigger_wf("nasguardian_guardian.yml", ref=branch,
+                          inputs={"skip_to_stage": "validate", "dry_run": "false"},
+                          repo=repo)
+    steps_done.append(f"{'✅' if repaired else '⚠️'} Triggered repair workflow on <code>{esc(branch)}</code>")
+
+    # Step 2 — Create a GitHub issue documenting the fix
+    owner, rname = repo.split("/")
+    issue_body = (
+        f"## 🔧 Auto-Fix Applied\n\n"
+        f"**Triggered by:** NasTech Guardian Bot\n"
+        f"**Failed workflow:** {wf_name}\n"
+        f"**Branch:** `{branch}`\n"
+        f"**Commit:** `{sha}`\n\n"
+        f"### Fix Plan\n{fix_text[:3000]}\n\n"
+        + (f"### Applied Command\n```\n{fix_cmd}\n```\n\n" if fix_cmd else "")
+        + f"---\n*{BRAND}*"
+    )
+    issue = gh("POST", f"/repos/{owner}/{rname}/issues", {
+        "title": f"🔧 Auto-Fix: {wf_name} failure on {branch} ({sha})",
+        "body":  issue_body,
+        "labels": ["auto-fix", "bot"],
+    }, repo=repo)
+    issue_url = issue.get("html_url", "")
+    issue_num = issue.get("number", "?")
+    steps_done.append(
+        f"{'✅' if issue_url else '⚠️'} Created issue "
+        + (f"<a href='{issue_url}'>#{issue_num}</a>" if issue_url else f"#{issue_num} (no URL)")
+    )
+
+    # Clear pending fix
+    sessions[cid].pop("pending_fix", None)
+
+    result_text = (
+        f"✅ <b>Auto-Fix Applied!</b>\n\n"
+        + "\n".join(steps_done)
+        + f"\n\n📎 <a href='{fix.get('url','')}'>Original failed run</a>"
+        + (f"\n📌 <a href='{issue_url}'>Fix tracking issue</a>" if issue_url else "")
+        + f"\n\n<i>{BRAND}</i>"
+    )
+    await msg.edit_text(
+        result_text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=_KEYBOARDS_BUILT["main"],
+    )
+
+
+async def cmd_cancelfix(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Cancel the pending auto-fix proposal."""
+    if not authorized(u): return await deny(u)
+    cid = str(u.effective_chat.id)
+    sessions[cid].pop("pending_fix", None)
+    await u.message.reply_text(
+        "❌ Fix cancelled.",
+        reply_markup=_KEYBOARDS_BUILT["main"],
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -2288,6 +2754,13 @@ async def post_init(app: "Application"):
         BotCommand("setkey",      "Change an API key live"),
         BotCommand("testkeys",    "Test all API connections"),
         BotCommand("menu",        "Switch keyboard category"),
+        BotCommand("errorshot",   "Download full error log as .txt file"),
+        BotCommand("notif",       "Show notification settings"),
+        BotCommand("notifon",     "Turn a notification type ON"),
+        BotCommand("notifoff",    "Turn a notification type OFF"),
+        BotCommand("autofix",     "AI-diagnose failure and propose fix"),
+        BotCommand("approvefix",  "Approve and apply the pending auto-fix"),
+        BotCommand("cancelfix",   "Cancel the pending auto-fix"),
     ]
     await app.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
     logger.info(f"Bot commands set ({len(commands)} commands)")
@@ -2317,6 +2790,7 @@ def main():
         sys.exit(1)
 
     print(f"🛡️  NasTech Guardian Bot v{BOT_VERSION}")
+    print(f"   Developer: Nsamba Naswif Cohen")
     print(f"   Repo:    {GITHUB_REPO}")
     print(f"   Auth:    {'restricted (' + str(len(WHITELIST)) + ' IDs)' if WHITELIST else 'open'}")
     print(f"   Groq:    {'✅' if GROQ_KEY else '❌ missing'}")
@@ -2389,6 +2863,13 @@ def main():
         ("setkey",      cmd_setkey),
         ("testkeys",    cmd_testkeys),
         ("menu",        cmd_menu),
+        ("errorshot",   cmd_errorshot),
+        ("notif",       cmd_notif),
+        ("notifon",     cmd_notifon),
+        ("notifoff",    cmd_notifoff),
+        ("autofix",     cmd_autofix),
+        ("approvefix",  cmd_approvefix),
+        ("cancelfix",   cmd_cancelfix),
     ]
 
     for name, handler in handlers:
