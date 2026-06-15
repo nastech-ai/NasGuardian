@@ -1,0 +1,128 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "NasTech AI Terminal — Renovate dependency management",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    ":separatePatchReleases",
+    "group:allNonMajor"
+  ],
+  "timezone": "UTC",
+  "schedule": ["every weekend"],
+  "prCreation": "immediate",
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 8,
+  "labels": ["dependencies", "renovate"],
+  "assignees": [],
+  "reviewers": [],
+  "commitMessagePrefix": "build(deps):",
+  "semanticCommitType": "build",
+  "semanticCommitScope": "deps",
+  "dependencyDashboard": true,
+  "dependencyDashboardTitle": "📦 NasTech Dependency Dashboard",
+  "dependencyDashboardHeader": "This dashboard tracks all pending dependency updates for NasTech AI Terminal.\n\n> Managed by [Renovate](https://renovatebot.com) + NasTech Guardian",
+  "vulnerabilityAlerts": {
+    "labels": ["security", "dependencies"],
+    "automerge": false
+  },
+  "packageRules": [
+    {
+      "description": "Group all Gradle / Android SDK updates",
+      "matchManagers": ["gradle", "gradle-wrapper"],
+      "groupName": "Gradle & Android SDK",
+      "labels": ["android", "dependencies"],
+      "schedule": ["every weekend"]
+    },
+    {
+      "description": "Group GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions",
+      "labels": ["ci", "dependencies"],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
+      "schedule": ["every weekend"]
+    },
+    {
+      "description": "Group Python pip dependencies",
+      "matchManagers": ["pip_requirements", "pip-compile", "pipenv", "poetry"],
+      "groupName": "Python dependencies",
+      "labels": ["python", "dependencies"]
+    },
+    {
+      "description": "Auto-merge patch-level Python tool updates",
+      "matchManagers": ["pip_requirements"],
+      "matchUpdateTypes": ["patch"],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash"
+    },
+    {
+      "description": "NDK updates — require manual review",
+      "matchPackagePatterns": ["android-ndk", "ndk"],
+      "labels": ["ndk", "dependencies", "needs-review"],
+      "automerge": false,
+      "reviewers": []
+    },
+    {
+      "description": "Major version bumps — always require review",
+      "matchUpdateTypes": ["major"],
+      "labels": ["breaking-change", "dependencies"],
+      "automerge": false,
+      "addLabels": ["major-update"]
+    },
+    {
+      "description": "Dependabot security fixes — fast track",
+      "matchDatasources": ["github-advisories"],
+      "labels": ["security"],
+      "schedule": ["at any time"],
+      "prPriority": 10
+    }
+  ],
+  "gradle": {
+    "enabled": true,
+    "fileMatch": [
+      "^build\\.gradle$",
+      "^app/build\\.gradle$",
+      "^.+/build\\.gradle$",
+      "^gradle\\.properties$",
+      "^gradle/libs\\.versions\\.toml$"
+    ]
+  },
+  "pip_requirements": {
+    "enabled": true,
+    "fileMatch": ["(^|/)requirements\\.txt$", "(^|/)requirements/.+\\.txt$"]
+  },
+  "github-actions": {
+    "enabled": true,
+    "fileMatch": ["^\\.github/workflows/[^/]+\\.ya?ml$"]
+  },
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/build/**",
+    "**/.gradle/**",
+    "**/vendor/**"
+  ],
+  "postUpdateOptions": ["gradlewUpdateTask"],
+  "customManagers": [
+    {
+      "description": "NDK version in gradle.properties",
+      "customType": "regex",
+      "fileMatch": ["^gradle\\.properties$"],
+      "matchStrings": ["ndkVersion\\s*=\\s*(?<currentValue>[\\d.]+)"],
+      "depNameTemplate": "android-ndk",
+      "datasourceTemplate": "github-releases",
+      "packageNameTemplate": "android/ndk"
+    },
+    {
+      "description": "compileSdkVersion in gradle.properties",
+      "customType": "regex",
+      "fileMatch": ["^gradle\\.properties$"],
+      "matchStrings": ["compileSdkVersion\\s*=\\s*(?<currentValue>\\d+)"],
+      "depNameTemplate": "android-compileSdk",
+      "datasourceTemplate": "github-tags",
+      "packageNameTemplate": "google/android"
+    }
+  ]
+}
