@@ -1534,6 +1534,207 @@ async def cmd_clear(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text("🗑️ Conversation history cleared.")
 
 
+# ── API Key Management via Telegram ──────────────────────────────────
+_KEY_NAMES = {
+    "GROQ_API_KEY":                 ("Groq",        "groq"),
+    "GEMINI_API_KEY":               ("Gemini",       "gemini"),
+    "OPENROUTER_API_KEY":           ("OpenRouter",   "openrouter"),
+    "TELEGRAM_BOT_TOKEN":           ("Telegram Bot Token", "telegram"),
+    "TELEGRAM_CHAT_ID":             ("Telegram Chat ID",   "telegram"),
+    "GITHUB_TOKEN":                 ("GitHub PAT",   "github"),
+    "GH_TOKEN":                     ("GitHub PAT",   "github"),
+    "GITHUB_PERSONAL_ACCESS_TOKEN": ("GitHub PAT",   "github"),
+}
+
+_NASTECH_ENV_FILE = os.path.expanduser("~/.nastech_env")
+
+
+def _mask(val: str) -> str:
+    if not val:
+        return "❌ <i>not set</i>"
+    if len(val) <= 8:
+        return "✅ " + "*" * len(val)
+    return "✅ " + val[:6] + "…" + val[-3:]
+
+
+def _load_env_file() -> dict:
+    env = {}
+    try:
+        with open(_NASTECH_ENV_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("export ") and "=" in line:
+                    line = line[7:]
+                if "=" in line and not line.startswith("#"):
+                    k, _, v = line.partition("=")
+                    env[k.strip()] = v.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    return env
+
+
+def _write_env_file(env: dict):
+    lines = ["# NasTech Guardian — API Keys", "# Managed via Telegram /setkey", ""]
+    for k, v in env.items():
+        lines.append(f'export {k}="{v}"')
+    with open(_NASTECH_ENV_FILE, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.environ.update({k: v for k, v in env.items() if v})
+
+
+async def cmd_apikeys(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(u): return await deny(u)
+    file_env = _load_env_file()
+    rows = []
+    for key in ["GROQ_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY",
+                "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "GITHUB_TOKEN"]:
+        val = os.environ.get(key) or file_env.get(key, "")
+        label = _KEY_NAMES.get(key, (key,))[0]
+        rows.append(f"  <b>{label}</b>: {_mask(val)}")
+    keys_list = "\n".join(rows)
+    text = (
+        "🔑 <b>API Keys Status</b>\n\n"
+        f"{keys_list}\n\n"
+        "<b>Change a key:</b>\n"
+        "<code>/setkey GROQ_API_KEY gsk_xxxx</code>\n"
+        "<code>/setkey GEMINI_API_KEY AIzaxxxx</code>\n"
+        "<code>/setkey OPENROUTER_API_KEY sk-or-xxxx</code>\n"
+        "<code>/setkey TELEGRAM_BOT_TOKEN 12345:xxxx</code>\n"
+        "<code>/setkey GITHUB_TOKEN ghp_xxxx</code>\n\n"
+        "🛡️ Values are masked in this view."
+    )
+    await u.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def cmd_setkey(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(u): return await deny(u)
+    args = ctx.args or []
+    if len(args) < 2:
+        await u.message.reply_text(
+            "🔑 <b>Set API Key</b>\n\n"
+            "Usage:\n"
+            "<code>/setkey KEY_NAME value</code>\n\n"
+            "<b>Available keys:</b>\n"
+            "  <code>GROQ_API_KEY</code>\n"
+            "  <code>GEMINI_API_KEY</code>\n"
+            "  <code>OPENROUTER_API_KEY</code>\n"
+            "  <code>TELEGRAM_BOT_TOKEN</code>\n"
+            "  <code>TELEGRAM_CHAT_ID</code>\n"
+            "  <code>GITHUB_TOKEN</code>\n\n"
+            "Example:\n"
+            "<code>/setkey GROQ_API_KEY gsk_abc123</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    key_name = args[0].strip().upper()
+    key_val  = " ".join(args[1:]).strip()
+
+    allowed = {
+        "GROQ_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY",
+        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+        "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN"
+    }
+    if key_name not in allowed:
+        await u.message.reply_text(
+            f"❌ Unknown key: <code>{key_name}</code>\n"
+            f"Allowed: {', '.join(sorted(allowed))}",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    os.environ[key_name] = key_val
+    file_env = _load_env_file()
+    file_env[key_name] = key_val
+    try:
+        _write_env_file(file_env)
+        saved_to = f"✅ Saved to <code>{_NASTECH_ENV_FILE}</code>"
+    except Exception as e:
+        saved_to = f"⚠️ Could not write file: {e}"
+
+    global GROQ_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY
+    if key_name == "GROQ_API_KEY":          GROQ_API_KEY       = key_val
+    if key_name == "GEMINI_API_KEY":        GEMINI_API_KEY     = key_val
+    if key_name in ("OPENROUTER_API_KEY",): OPENROUTER_API_KEY = key_val
+    if key_name in ("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN"):
+        global GITHUB_TOKEN
+        GITHUB_TOKEN = key_val
+
+    label  = _KEY_NAMES.get(key_name, (key_name,))[0]
+    masked = _mask(key_val)
+    await u.message.reply_text(
+        f"🔑 <b>{label}</b> updated!\n\n"
+        f"  Value: {masked}\n"
+        f"  {saved_to}\n\n"
+        "💡 Key is live immediately — no restart needed.\n"
+        "Use /apikeys to see all keys.",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def cmd_testkeys(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(u): return await deny(u)
+    msg = await u.message.reply_text("🔍 Testing API keys…", parse_mode=ParseMode.HTML)
+    results = []
+
+    async def _test_groq():
+        k = os.environ.get("GROQ_API_KEY", "")
+        if not k: return "❌ Groq — not set"
+        try:
+            import aiohttp
+            headers = {"Authorization": f"Bearer {k}", "Content-Type": "application/json"}
+            payload = {"model": "llama3-8b-8192", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}
+            async with aiohttp.ClientSession() as s:
+                async with s.post("https://api.groq.com/openai/v1/chat/completions",
+                                  json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    return "✅ Groq — OK" if r.status == 200 else f"❌ Groq — HTTP {r.status}"
+        except Exception as e:
+            return f"⚠️ Groq — {type(e).__name__}"
+
+    async def _test_gemini():
+        k = os.environ.get("GEMINI_API_KEY", "")
+        if not k: return "❌ Gemini — not set"
+        try:
+            import aiohttp
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={k}"
+            payload = {"contents": [{"parts": [{"text": "hi"}]}]}
+            async with aiohttp.ClientSession() as s:
+                async with s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    return "✅ Gemini — OK" if r.status == 200 else f"❌ Gemini — HTTP {r.status}"
+        except Exception as e:
+            return f"⚠️ Gemini — {type(e).__name__}"
+
+    async def _test_openrouter():
+        k = os.environ.get("OPENROUTER_API_KEY", "")
+        if not k: return "❌ OpenRouter — not set"
+        try:
+            import aiohttp
+            headers = {"Authorization": f"Bearer {k}", "Content-Type": "application/json"}
+            payload = {"model": "mistralai/mistral-7b-instruct:free", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}
+            async with aiohttp.ClientSession() as s:
+                async with s.post("https://openrouter.ai/api/v1/chat/completions",
+                                  json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    return "✅ OpenRouter — OK" if r.status == 200 else f"❌ OpenRouter — HTTP {r.status}"
+        except Exception as e:
+            return f"⚠️ OpenRouter — {type(e).__name__}"
+
+    tests = await asyncio.gather(
+        _test_groq(), _test_gemini(), _test_openrouter(),
+        return_exceptions=True
+    )
+    lines = "\n".join(str(t) for t in tests)
+    tg_ok  = "✅" if os.environ.get("TELEGRAM_BOT_TOKEN") else "❌"
+    gh_ok  = "✅" if (os.environ.get("GITHUB_TOKEN") or
+                      os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")) else "❌"
+    await msg.edit_text(
+        f"🔍 <b>API Key Test Results</b>\n\n"
+        f"{lines}\n"
+        f"{tg_ok} Telegram Bot Token\n"
+        f"{gh_ok} GitHub PAT\n\n"
+        "Use /setkey to update any key.",
+        parse_mode=ParseMode.HTML
+    )
+
+
 async def cmd_ai_off(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(u): return await deny(u)
     cid = str(u.effective_chat.id)
@@ -1672,6 +1873,9 @@ async def post_init(app: "Application"):
         BotCommand("subscribe",   "Subscribe daily digest"),
         BotCommand("services",    "Service health check"),
         BotCommand("memory",      "Bot state info"),
+        BotCommand("apikeys",     "Show all API keys (masked)"),
+        BotCommand("setkey",      "Change an API key live"),
+        BotCommand("testkeys",    "Test all API connections"),
     ]
     await app.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
     logger.info(f"Bot commands set ({len(commands)} commands)")
@@ -1769,6 +1973,9 @@ def main():
         ("network",     cmd_services),
         ("memory",      cmd_memory),
         ("backup",      cmd_backup),
+        ("apikeys",     cmd_apikeys),
+        ("setkey",      cmd_setkey),
+        ("testkeys",    cmd_testkeys),
     ]
 
     for name, handler in handlers:
