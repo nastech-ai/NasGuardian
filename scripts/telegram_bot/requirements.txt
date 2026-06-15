@@ -1,0 +1,6 @@
+python-telegram-bot>=20.7
+requests>=2.31.0
+apscheduler>=3.10.0
+pillow>=10.0.0
+pytesseract>=0.3.10
+yt-dlp>=2024.1.1
