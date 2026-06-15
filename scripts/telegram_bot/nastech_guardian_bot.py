@@ -119,6 +119,11 @@ def _default_session():
             "release":  True,
             "daily":    False,
         },
+        "watchdog": {
+            "active":   False,
+            "interval": 5,
+            "seen_ids": [],
+        },
     }
 
 sessions: dict = defaultdict(_default_session)
@@ -458,6 +463,7 @@ _KB_NOTIFICATIONS = [
     ["🔕 Failures OFF",     "🔔 PR Alerts ON",      "🔕 PR Alerts OFF"],
     ["🔔 Release ON",       "🔕 Release OFF",       "🔔 Security ON"],
     ["🔕 Security OFF",     "📅 Daily ON",          "🔕 Daily OFF"],
+    ["👁 Watchdog ON",      "👁 Watchdog OFF",      "👁 Watchdog Status"],
     ["📋 Digest Now",       "📤 Error Screenshot",  "🏠 Main Menu"],
 ]
 
@@ -646,6 +652,10 @@ _BUTTON_COMMANDS: dict = {
     "🔧 Auto Fix":          ("/autofix",      None),
     "✅ Approve Fix":       ("/approvefix",   None),
     "❌ Cancel Fix":        ("/cancelfix",    None),
+    # Watchdog
+    "👁 Watchdog ON":       ("/watchdog",     "on"),
+    "👁 Watchdog OFF":      ("/watchdog",     "off"),
+    "👁 Watchdog Status":   ("/watchdog",     "status"),
 }
 
 def make_keyboard(rows: list) -> ReplyKeyboardMarkup:
@@ -1764,8 +1774,13 @@ async def cmd_errors(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     blocks.append(f"\n<i>{BRAND}</i>\n💡 Use /errorshot to download full log as a file")
     text = "\n".join(blocks)
+    inline_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔧 Auto Fix",        callback_data="inline:autofix"),
+        InlineKeyboardButton("📤 Download Log",    callback_data="inline:errorshot"),
+        InlineKeyboardButton("🔄 Refresh Errors",  callback_data="inline:refresh_errors"),
+    ]])
     await msg.edit_text(truncate(text, 4000), parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True)
+                        disable_web_page_preview=True, reply_markup=inline_kb)
 
 
 async def cmd_errorshot(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2562,6 +2577,7 @@ async def unknown_cmd(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────────────────────────────
 
 _scheduled_chats: set = set()
+_scheduler       = None   # set in post_init; used by /watchdog
 
 async def send_daily_digest(app: "Application"):
     """Send daily AI digest to all tracked chats at 09:00 UTC."""
@@ -2605,6 +2621,145 @@ async def cmd_daily_subscribe(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Use /unsubscribe to cancel.",
         parse_mode=ParseMode.HTML
     )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Watchdog — background CI polling
+# ─────────────────────────────────────────────────────────────────────
+
+async def _watchdog_poll(cid: str, app: "Application"):
+    """Called by scheduler every N minutes. Alerts on new CI failures."""
+    sess = sessions[cid]
+    if not sess["watchdog"]["active"]:
+        return
+    repo = sess.get("repo", NASGUARDIAN_REPO)
+    seen = set(sess["watchdog"].get("seen_ids", []))
+    runs = wf_runs(limit=10, repo=NASGUARDIAN_REPO)
+    new_failures = []
+    for run in runs:
+        rid = run.get("id")
+        if rid and rid not in seen:
+            seen.add(rid)
+            if run.get("conclusion") == "failure":
+                new_failures.append(run)
+    # persist seen IDs (cap at 50)
+    sess["watchdog"]["seen_ids"] = list(seen)[-50:]
+    if not new_failures:
+        return
+    for run in new_failures:
+        wf_name = run.get("name","?")
+        branch  = run.get("head_branch","?")
+        sha     = run.get("head_sha","?")[:7]
+        url     = run.get("html_url","")
+        msg_text = (
+            f"🚨 <b>Watchdog Alert — New Failure Detected!</b>\n\n"
+            f"❌ <b>{esc(wf_name)}</b> on <code>{esc(branch)}</code>\n"
+            f"🔗 Commit <code>{sha}</code>\n"
+            f"<a href='{url}'>View Run on GitHub →</a>\n\n"
+            f"👉 Tap /autofix to diagnose and propose a fix.\n"
+            f"<i>{BRAND}</i>"
+        )
+        inline_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔧 Auto Fix",  callback_data="inline:autofix"),
+            InlineKeyboardButton("🔍 View Run",  url=url),
+        ]])
+        try:
+            await app.bot.send_message(
+                chat_id=cid, text=msg_text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=inline_kb,
+            )
+        except Exception:
+            pass
+
+
+async def cmd_watchdog(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Start/stop the CI failure watchdog. /watchdog on|off|status [interval_min]"""
+    if not authorized(u): return await deny(u)
+    cid  = str(u.effective_chat.id)
+    args = ctx.args or []
+    action   = (args[0].lower() if args else "status").strip()
+    interval = int(args[1]) if len(args) > 1 and args[1].isdigit() else 5
+    interval = max(2, min(interval, 60))
+
+    sess = sessions[cid]["watchdog"]
+
+    if action == "on":
+        sess["active"]   = True
+        sess["interval"] = interval
+        sess["seen_ids"] = []   # reset so we don't alert on old runs
+        # Register/replace scheduler job
+        if _scheduler:
+            job_id = f"watchdog_{cid}"
+            try:
+                _scheduler.remove_job(job_id)
+            except Exception:
+                pass
+            _scheduler.add_job(
+                lambda: asyncio.ensure_future(_watchdog_poll(cid, ctx.application)),
+                "interval", minutes=interval, id=job_id,
+            )
+        await u.message.reply_text(
+            f"👁 <b>Watchdog started</b>\n\n"
+            f"Polling <code>{NASGUARDIAN_REPO}</code> every <b>{interval} min</b>.\n"
+            f"You'll get an instant alert + 🔧 Auto Fix button on any new failure.\n\n"
+            f"Stop anytime: 👁 Watchdog OFF\n<i>{BRAND}</i>",
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif action == "off":
+        sess["active"] = False
+        if _scheduler:
+            try:
+                _scheduler.remove_job(f"watchdog_{cid}")
+            except Exception:
+                pass
+        await u.message.reply_text(
+            "🔕 <b>Watchdog stopped.</b>\nNo more CI failure alerts.\n\n"
+            "Restart anytime: 👁 Watchdog ON",
+            parse_mode=ParseMode.HTML,
+        )
+
+    else:  # status
+        active   = sess.get("active", False)
+        interval = sess.get("interval", 5)
+        seen_ct  = len(sess.get("seen_ids", []))
+        await u.message.reply_text(
+            f"👁 <b>Watchdog Status</b>\n\n"
+            f"State:     {'🟢 Active' if active else '🔴 Stopped'}\n"
+            f"Interval:  every {interval} min\n"
+            f"Repo:      <code>{NASGUARDIAN_REPO}</code>\n"
+            f"Seen runs: {seen_ct} cached\n\n"
+            f"{'👉 Running — you will be alerted on new failures.' if active else '👉 Use 👁 Watchdog ON to start.'}\n"
+            f"<i>{BRAND}</i>",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+async def callback_inline(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle all inline keyboard button taps."""
+    query = u.callback_query
+    await query.answer()
+    cid    = str(query.message.chat.id)
+    action = (query.data or "").replace("inline:", "")
+
+    class _FakeUpdate:
+        def __init__(self, orig):
+            self.effective_chat = orig.message.chat
+            self.message        = orig.message
+            self.callback_query = orig.callback_query
+
+    fake = _FakeUpdate(query)
+
+    if action == "autofix":
+        await cmd_autofix(fake, ctx)
+    elif action == "errorshot":
+        await cmd_errorshot(fake, ctx)
+    elif action == "refresh_errors":
+        await cmd_errors(fake, ctx)
+    else:
+        await query.message.reply_text(f"⚠️ Unknown action: {action}")
 
 
 async def cmd_unsubscribe(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2938,18 +3093,20 @@ async def post_init(app: "Application"):
         BotCommand("autofix",     "AI-diagnose failure and propose fix"),
         BotCommand("approvefix",  "Approve and apply the pending auto-fix"),
         BotCommand("cancelfix",   "Cancel the pending auto-fix"),
+        BotCommand("watchdog",    "Auto-poll CI every N min, alert on new failures"),
     ]
     await app.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
     logger.info(f"Bot commands set ({len(commands)} commands)")
 
     # Scheduler
     if SCHEDULER_OK:
-        scheduler = AsyncIOScheduler(timezone="UTC")
-        scheduler.add_job(
+        global _scheduler
+        _scheduler = AsyncIOScheduler(timezone="UTC")
+        _scheduler.add_job(
             lambda: asyncio.ensure_future(send_daily_digest(app)),
             "cron", hour=9, minute=0
         )
-        scheduler.start()
+        _scheduler.start()
         logger.info("Daily digest scheduler started (09:00 UTC)")
 
     # Register default chat from env
@@ -3047,11 +3204,14 @@ def main():
         ("autofix",     cmd_autofix),
         ("approvefix",  cmd_approvefix),
         ("cancelfix",   cmd_cancelfix),
+        ("watchdog",    cmd_watchdog),
     ]
 
     for name, handler in handlers:
         app.add_handler(CommandHandler(name, handler))
 
+    # Inline keyboard callbacks
+    app.add_handler(CallbackQueryHandler(callback_inline, pattern="^inline:"))
     # Photo handler for OCR
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     # Text → AI chat
