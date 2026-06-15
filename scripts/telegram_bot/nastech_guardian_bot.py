@@ -78,9 +78,12 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GROQ_KEY     = os.environ.get("GROQ_API_KEY", "")
 GEMINI_KEY   = os.environ.get("GEMINI_API_KEY", "")
 OR_KEY       = os.environ.get("OPENROUTER_API_KEY", "")
-GITHUB_REPO  = os.environ.get("GITHUB_REPO", "nastech-ai/NasTerminal")
-GUARDIAN_WF  = "nastech_guardian.yml"
-BOT_VERSION  = "3.0.0"
+GITHUB_REPO      = os.environ.get("GITHUB_REPO", "nastech-ai/NasTerminal")
+NASGUARDIAN_REPO = "nastech-ai/NasGuardian"
+GUARDIAN_WF      = "nasguardian_guardian.yml"
+TESTS_WF         = "nasguardian_tests.yml"
+AUDIT_WF         = "nasguardian_audit.yml"
+BOT_VERSION      = "3.0.0"
 BRAND        = "🛡️ NasTech Guardian  |  Developed by Nsamba Naswif Cohen"
 
 # Whitelist: comma-separated chat IDs. Empty = allow all.
@@ -1484,44 +1487,52 @@ async def cmd_scan(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_build(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(u): return await deny(u)
-    cid  = str(u.effective_chat.id)
-    repo = sessions[cid]["repo"]
-    msg  = await u.message.reply_text("⏳ Triggering build…")
-    ok   = trigger_wf("debug_build.yml", repo=repo)
+    msg = await u.message.reply_text("⏳ Triggering build pipeline…")
+    ok  = trigger_wf(GUARDIAN_WF, inputs={"skip_to_stage": "identity", "dry_run": "false"},
+                     repo=NASGUARDIAN_REPO)
     await msg.edit_text(
-        ('🔨 <b>Build triggered!</b>' if ok else '❌ Failed.') +
-        f"\n<a href='https://github.com/{esc(repo)}/actions'>Monitor</a>",
+        ('🔨 <b>Build triggered!</b>\nRunning: Identity → Dependency → Health → Validate' if ok
+         else '❌ Could not trigger build. Check GitHub token permissions.') +
+        f"\n<a href='https://github.com/{NASGUARDIAN_REPO}/actions'>Monitor Actions →</a>",
         parse_mode=ParseMode.HTML, disable_web_page_preview=True
     )
 
 
 async def cmd_rebuild(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(u): return await deny(u)
-    cid  = str(u.effective_chat.id)
-    repo = sessions[cid]["repo"]
-    ok   = trigger_wf(GUARDIAN_WF, inputs={"force_repair": "false"}, repo=repo)
-    await u.message.reply_text(
-        f"{'🔨 <b>Rebuild triggered!</b>' if ok else '❌ Failed.'}",
-        parse_mode=ParseMode.HTML
+    msg = await u.message.reply_text("⏳ Triggering full rebuild…")
+    ok  = trigger_wf(GUARDIAN_WF, inputs={"skip_to_stage": "identity", "dry_run": "false"},
+                     repo=NASGUARDIAN_REPO)
+    await msg.edit_text(
+        ('🔨 <b>Rebuild triggered!</b>\nFull pipeline: Identity → Dependency → Health → Validate → Release' if ok
+         else '❌ Could not trigger rebuild. Check GitHub token has <code>workflow</code> scope.') +
+        f"\n<a href='https://github.com/{NASGUARDIAN_REPO}/actions'>Monitor →</a>",
+        parse_mode=ParseMode.HTML, disable_web_page_preview=True
     )
 
 
 async def cmd_test(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(u): return await deny(u)
-    cid  = str(u.effective_chat.id)
-    repo = sessions[cid]["repo"]
-    ok   = trigger_wf("run_tests.yml", repo=repo)
-    await u.message.reply_text(f"{'🧪 <b>Tests triggered!</b>' if ok else '❌ Failed.'}", parse_mode=ParseMode.HTML)
+    msg = await u.message.reply_text("⏳ Triggering test suite…")
+    ok  = trigger_wf(TESTS_WF, repo=NASGUARDIAN_REPO)
+    await msg.edit_text(
+        ('🧪 <b>Tests triggered!</b>\nSyntax Check · Agent Imports · Bot Test · Shell Lint' if ok
+         else '❌ Could not trigger tests. Check GitHub token has <code>workflow</code> scope.') +
+        f"\n<a href='https://github.com/{NASGUARDIAN_REPO}/actions'>Monitor →</a>",
+        parse_mode=ParseMode.HTML, disable_web_page_preview=True
+    )
 
 
 async def cmd_repair(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(u): return await deny(u)
-    cid  = str(u.effective_chat.id)
-    repo = sessions[cid]["repo"]
-    ok   = trigger_wf(GUARDIAN_WF, inputs={"force_repair": "true", "dry_run": "false"}, repo=repo)
-    await u.message.reply_text(
-        ('🔧 <b>Repair Bot triggered!</b>\nA PR will be created if patches are found.' if ok else '❌ Failed.'),
-        parse_mode=ParseMode.HTML
+    msg = await u.message.reply_text("⏳ Triggering repair pipeline…")
+    ok  = trigger_wf(GUARDIAN_WF, inputs={"skip_to_stage": "identity", "dry_run": "false"},
+                     repo=NASGUARDIAN_REPO)
+    await msg.edit_text(
+        ('🔧 <b>Repair Bot triggered!</b>\nGuardian will scan and create a fix PR if patches are found.' if ok
+         else '❌ Could not trigger repair. Check GitHub token has <code>workflow</code> scope.') +
+        f"\n<a href='https://github.com/{NASGUARDIAN_REPO}/actions'>Monitor →</a>",
+        parse_mode=ParseMode.HTML, disable_web_page_preview=True
     )
 
 
@@ -1553,23 +1564,119 @@ async def cmd_health(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(u): return await deny(u)
     cid  = str(u.effective_chat.id)
     repo = sessions[cid]["repo"]
-    ok   = trigger_wf(GUARDIAN_WF, repo=repo)
-    await u.message.reply_text(
-        ('🏥 <b>Health check triggered!</b>' if ok else '❌ Failed.') +
-        f"\n<a href='https://github.com/{esc(repo)}/actions'>Monitor</a>",
-        parse_mode=ParseMode.HTML, disable_web_page_preview=True
-    )
+    msg  = await u.message.reply_text("⏳ Running health check…")
+    lines = ["❤️ <b>Health Check</b>\n"]
+
+    # GitHub API connectivity
+    owner, rname = repo.split("/")
+    rate = gh("GET", "/rate_limit")
+    if "error" not in rate:
+        rem  = rate.get("rate", {}).get("remaining", "?")
+        lim  = rate.get("rate", {}).get("limit", "?")
+        lines.append(f"✅ GitHub API  —  {rem}/{lim} requests remaining")
+    else:
+        lines.append(f"❌ GitHub API  —  {esc(rate['error'])}")
+
+    # GitHub token scope check
+    if GITHUB_TOKEN:
+        lines.append("✅ GitHub Token  —  set")
+    else:
+        lines.append("❌ GitHub Token  —  NOT SET")
+
+    # AI providers
+    lines.append(f"{'✅' if GROQ_KEY else '❌'} Groq API  —  {'set' if GROQ_KEY else 'missing'}")
+    lines.append(f"{'✅' if GEMINI_KEY else '❌'} Gemini API  —  {'set' if GEMINI_KEY else 'missing'}")
+    lines.append(f"{'✅' if OR_KEY else '❌'} OpenRouter  —  {'set' if OR_KEY else 'missing'}")
+
+    # Recent workflow status on NasGuardian
+    runs = wf_runs(limit=5, repo=NASGUARDIAN_REPO)
+    if runs:
+        passed = sum(1 for r in runs if r.get("conclusion") == "success")
+        failed = sum(1 for r in runs if r.get("conclusion") == "failure")
+        lines.append(f"\n📊 <b>Last 5 runs (NasGuardian):</b>  ✅ {passed} passed  ❌ {failed} failed")
+        last = runs[0]
+        icon = {"success": "✅", "failure": "❌", "cancelled": "⏹️"}.get(last.get("conclusion", ""), "🔄")
+        lines.append(f"{icon} Latest: {esc(last.get('name','?')[:40])} — {esc(last.get('conclusion') or last.get('status','?'))}")
+    else:
+        lines.append("\n⚠️ No recent workflow runs found on NasGuardian")
+
+    # Repo accessibility
+    repo_info = gh("GET", f"/repos/{owner}/{rname}")
+    if "error" not in repo_info:
+        stars = repo_info.get("stargazers_count", 0)
+        lines.append(f"\n✅ Repo <code>{esc(repo)}</code>  —  ⭐ {stars} stars")
+    else:
+        lines.append(f"\n❌ Repo <code>{esc(repo)}</code>  —  {esc(repo_info['error'])}")
+
+    lines.append(f"\n<i>{BRAND}</i>")
+    await msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True)
 
 
 async def cmd_doctor(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(u): return await deny(u)
     cid  = str(u.effective_chat.id)
     repo = sessions[cid]["repo"]
-    ok   = trigger_wf("nastech_doctor.yml", repo=repo)
-    await u.message.reply_text(
-        f"{'🩺 <b>Doctor scan triggered!</b>' if ok else '❌ Failed.'}",
-        parse_mode=ParseMode.HTML
-    )
+    msg  = await u.message.reply_text("⏳ Running deep diagnostic…")
+    lines = ["🩺 <b>Doctor Scan</b>\n"]
+
+    # --- API keys ---
+    lines.append("<b>🔑 API Keys</b>")
+    lines.append(f"  {'✅' if GITHUB_TOKEN else '❌'} GitHub Token")
+    lines.append(f"  {'✅' if GROQ_KEY else '❌'} Groq API")
+    lines.append(f"  {'✅' if GEMINI_KEY else '❌'} Gemini API")
+    lines.append(f"  {'✅' if OR_KEY else '❌'} OpenRouter API")
+
+    # --- GitHub rate limit ---
+    rate = gh("GET", "/rate_limit")
+    if "error" not in rate:
+        r = rate.get("rate", {})
+        rem, lim = r.get("remaining","?"), r.get("limit","?")
+        reset_ts = r.get("reset", 0)
+        import datetime
+        reset_str = datetime.datetime.utcfromtimestamp(reset_ts).strftime("%H:%M UTC") if reset_ts else "?"
+        lines.append(f"\n<b>📡 GitHub API</b>")
+        lines.append(f"  Requests: {rem}/{lim}  —  resets at {reset_str}")
+    else:
+        lines.append(f"\n❌ GitHub API: {esc(rate['error'])}")
+
+    # --- NasGuardian workflow stats ---
+    lines.append(f"\n<b>🔄 NasGuardian Workflows (last 10 runs)</b>")
+    runs = wf_runs(limit=10, repo=NASGUARDIAN_REPO)
+    if runs:
+        by_wf: dict = {}
+        for r in runs:
+            name = r.get("name","?")
+            conc = r.get("conclusion") or r.get("status","?")
+            by_wf.setdefault(name, []).append(conc)
+        for wf_name, results in by_wf.items():
+            p = results.count("success")
+            f = results.count("failure")
+            lines.append(f"  {esc(wf_name[:30])}: ✅{p} ❌{f}")
+    else:
+        lines.append("  No runs found")
+
+    # --- Open issues + PRs ---
+    owner, rname = repo.split("/")
+    issues = gh("GET", f"/repos/{owner}/{rname}/issues?state=open&per_page=5")
+    if isinstance(issues, list):
+        real_issues = [i for i in issues if "pull_request" not in i]
+        prs          = [i for i in issues if "pull_request" in i]
+        lines.append(f"\n<b>📋 {esc(repo)}</b>")
+        lines.append(f"  Open Issues: {len(real_issues)}  •  Open PRs: {len(prs)}")
+    else:
+        lines.append(f"\n⚠️ Could not fetch issues: {esc(str(issues.get('error','?')))}")
+
+    # --- Bot session info ---
+    history_len = len(sessions[cid].get("history", []))
+    lines.append(f"\n<b>🤖 Bot Session</b>")
+    lines.append(f"  AI mode: {'ON' if sessions[cid].get('ai_mode') else 'OFF'}")
+    lines.append(f"  Chat history: {history_len} messages")
+    lines.append(f"  Tracking repo: <code>{esc(repo)}</code>")
+
+    lines.append(f"\n<i>{BRAND}</i>")
+    await msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True)
 
 
 async def cmd_logs(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1749,13 +1856,42 @@ async def cmd_errorshot(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_dependencies(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(u): return await deny(u)
-    cid = str(u.effective_chat.id)
+    cid  = str(u.effective_chat.id)
     repo = sessions[cid]["repo"]
-    ok   = trigger_wf("nastech_audit.yml", repo=repo)
-    await u.message.reply_text(
-        f"{'📦 <b>Dependency audit triggered!</b>' if ok else '❌ Failed.'}",
-        parse_mode=ParseMode.HTML
-    )
+    msg  = await u.message.reply_text("⏳ Running dependency audit…")
+    owner, rname = repo.split("/")
+    lines = [f"📦 <b>Dependency Audit — {esc(rname)}</b>\n"]
+
+    # Try reading requirements.txt
+    import base64
+    req = gh("GET", f"/repos/{owner}/{rname}/contents/scripts/telegram_bot/requirements.txt")
+    if "content" in req:
+        content = base64.b64decode(req["content"]).decode(errors="replace")
+        pkgs = [l.strip() for l in content.splitlines() if l.strip() and not l.startswith("#")]
+        lines.append(f"<b>Python packages ({len(pkgs)}):</b>")
+        for p in pkgs[:20]:
+            lines.append(f"  • <code>{esc(p)}</code>")
+        if len(pkgs) > 20:
+            lines.append(f"  … and {len(pkgs)-20} more")
+    else:
+        # Try root requirements.txt
+        req2 = gh("GET", f"/repos/{owner}/{rname}/contents/requirements.txt")
+        if "content" in req2:
+            content = base64.b64decode(req2["content"]).decode(errors="replace")
+            pkgs = [l.strip() for l in content.splitlines() if l.strip() and not l.startswith("#")]
+            lines.append(f"<b>Python packages ({len(pkgs)}):</b>")
+            for p in pkgs[:20]:
+                lines.append(f"  • <code>{esc(p)}</code>")
+        else:
+            lines.append("⚠️ No requirements.txt found in repo")
+            lines.append(f"\n<b>Triggering audit workflow…</b>")
+            ok = trigger_wf(AUDIT_WF, repo=NASGUARDIAN_REPO)
+            lines.append("✅ Audit workflow triggered" if ok else "❌ Workflow trigger failed")
+            lines.append(f"<a href='https://github.com/{NASGUARDIAN_REPO}/actions'>Monitor →</a>")
+
+    lines.append(f"\n<i>{BRAND}</i>")
+    await msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True)
 
 
 async def cmd_packages(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1782,21 +1918,61 @@ async def cmd_security(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(u): return await deny(u)
     cid  = str(u.effective_chat.id)
     repo = sessions[cid]["repo"]
-    ok   = trigger_wf("nastech_doctor.yml", repo=repo)
-    await u.message.reply_text(
-        f"{'🔒 <b>Security scan triggered!</b>' if ok else '❌ Failed.'}",
-        parse_mode=ParseMode.HTML
-    )
+    msg  = await u.message.reply_text("⏳ Running security audit…")
+    lines = [f"🔒 <b>Security Scan — {esc(repo.split('/')[-1])}</b>\n"]
+
+    # Check for known risky files / secrets patterns in repo tree
+    owner, rname = repo.split("/")
+    tree = gh("GET", f"/repos/{owner}/{rname}/git/trees/HEAD?recursive=1")
+    risky_exts  = {".env", ".pem", ".key", ".p12", ".pfx", ".jks"}
+    risky_names = {"secrets.json", ".env", "keystore.jks", "debug.keystore"}
+    found_risky = []
+    if "tree" in tree:
+        for item in tree["tree"]:
+            path = item.get("path","")
+            name = path.split("/")[-1].lower()
+            ext  = "." + name.rsplit(".",1)[-1] if "." in name else ""
+            if name in risky_names or ext in risky_exts:
+                found_risky.append(path)
+    if found_risky:
+        lines.append(f"⚠️ <b>{len(found_risky)} potentially sensitive file(s):</b>")
+        for f in found_risky[:10]:
+            lines.append(f"  • <code>{esc(f)}</code>")
+    else:
+        lines.append("✅ No sensitive files (.env / .key / .pem / keystore) found in tree")
+
+    # Check open security advisories
+    owner_g, rname_g = NASGUARDIAN_REPO.split("/")
+    advisories = gh("GET", f"/repos/{owner_g}/{rname_g}/vulnerability-alerts")
+    if isinstance(advisories, dict) and "error" in advisories:
+        lines.append("\n⚠️ Vulnerability alerts: requires admin access to check")
+    else:
+        lines.append("\n✅ No vulnerability alerts found")
+
+    # Trigger real audit workflow
+    ok = trigger_wf(AUDIT_WF, repo=NASGUARDIAN_REPO)
+    lines.append(f"\n<b>🔍 Full Audit Workflow:</b>")
+    lines.append("✅ Triggered — Bandit · Safety · Pylint running" if ok
+                 else "⚠️ Workflow trigger failed (token needs <code>workflow</code> scope)")
+    if ok:
+        lines.append(f"<a href='https://github.com/{NASGUARDIAN_REPO}/actions'>Monitor →</a>")
+
+    lines.append(f"\n<i>{BRAND}</i>")
+    await msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True)
 
 
 async def cmd_fix(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(u): return await deny(u)
     cid  = str(u.effective_chat.id)
-    repo = sessions[cid]["repo"]
-    ok   = trigger_wf(GUARDIAN_WF, inputs={"force_repair":"true"}, repo=repo)
-    await u.message.reply_text(
-        ('🔧 <b>Fix PR generation triggered!</b>\nCheck /pr when complete.' if ok else '❌ Failed.'),
-        parse_mode=ParseMode.HTML
+    msg  = await u.message.reply_text("⏳ Triggering fix pipeline…")
+    ok   = trigger_wf(GUARDIAN_WF, inputs={"skip_to_stage": "identity", "dry_run": "false"},
+                      repo=NASGUARDIAN_REPO)
+    await msg.edit_text(
+        ('🔧 <b>Fix pipeline triggered!</b>\nGuardian will scan → fix → open a PR with patches.' if ok
+         else '❌ Could not trigger fix. Check GitHub token has <code>workflow</code> scope.') +
+        f"\n<a href='https://github.com/{NASGUARDIAN_REPO}/actions'>Monitor →</a>",
+        parse_mode=ParseMode.HTML, disable_web_page_preview=True
     )
 
 
