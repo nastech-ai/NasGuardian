@@ -1,0 +1,667 @@
+name: NasTech Doctor — Health Check
+
+on:
+  push:
+    branches: [ master, main, 'github-releases/**' ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  # ──────────────────────────────────────────────
+  # 1. DEPENDENCY SCAN
+  # ──────────────────────────────────────────────
+  dependency-scan:
+    name: Dependency Scan
+    runs-on: ubuntu-latest
+    outputs:
+      dep_status: ${{ steps.scan.outputs.status }}
+      dep_report: ${{ steps.scan.outputs.report }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      - name: Run Dependency Scan
+        id: scan
+        shell: bash
+        run: |
+          echo "## Dependency Scan" >> dep_report.md
+          FAIL=0
+
+          # ── Gradle dependency tree ──
+          echo "### Gradle Module Dependencies" >> dep_report.md
+          ./gradlew :app:dependencies --configuration releaseRuntimeClasspath 2>&1 \
+            | grep -E "(FAILED|Could not resolve|error:)" >> dep_report.md || true
+
+          # ── Check all submodules compile ──
+          for module in app terminal-emulator terminal-view termux-shared; do
+            if [ -f "$module/build.gradle" ]; then
+              echo "Checking module: $module" >> dep_report.md
+              if ! ./gradlew ":$module:compileDebugJavaWithJavac" 2>&1 | tail -5 >> dep_report.md; then
+                echo "❌ Module $module compile FAILED" >> dep_report.md
+                FAIL=1
+              else
+                echo "✅ Module $module OK" >> dep_report.md
+              fi
+            fi
+          done
+
+          # ── Detect duplicate dependency declarations ──
+          echo "### Duplicate/Conflict Check" >> dep_report.md
+          grep -rn "implementation" app/build.gradle terminal-view/build.gradle \
+            termux-shared/build.gradle terminal-emulator/build.gradle 2>/dev/null \
+            | sort | uniq -d >> dep_report.md || echo "No duplicates found" >> dep_report.md
+
+          # ── Missing files check ──
+          echo "### Critical Files Check" >> dep_report.md
+          CRITICAL_FILES=(
+            "app/build.gradle"
+            "termux-shared/build.gradle"
+            "terminal-emulator/build.gradle"
+            "terminal-view/build.gradle"
+            "settings.gradle"
+            "build.gradle"
+            "gradle.properties"
+            "gradlew"
+            "app/src/main/AndroidManifest.xml"
+          )
+          for f in "${CRITICAL_FILES[@]}"; do
+            if [ -f "$f" ]; then
+              echo "✅ $f" >> dep_report.md
+            else
+              echo "❌ MISSING: $f" >> dep_report.md
+              FAIL=1
+            fi
+          done
+
+          # ── Save report ──
+          REPORT=$(cat dep_report.md)
+          echo "status=$( [ $FAIL -eq 0 ] && echo pass || echo fail )" >> $GITHUB_OUTPUT
+          {
+            echo "report<<EOF"
+            echo "$REPORT"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Upload Dependency Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-report
+          path: dep_report.md
+
+  # ──────────────────────────────────────────────
+  # 2. BUILD SCAN
+  # ──────────────────────────────────────────────
+  build-scan:
+    name: Build Scan
+    runs-on: ubuntu-latest
+    needs: dependency-scan
+    outputs:
+      build_status: ${{ steps.build.outputs.status }}
+      build_report: ${{ steps.build.outputs.report }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      - name: Run Build Scan
+        id: build
+        shell: bash
+        env:
+          TERMUX_PACKAGE_VARIANT: apt-android-7
+        run: |
+          echo "## Build Scan" >> build_report.md
+          FAIL=0
+
+          # ── Lint check ──
+          echo "### Lint Analysis" >> build_report.md
+          ./gradlew lint 2>&1 | tail -30 >> build_report.md || {
+            echo "⚠️  Lint produced warnings/errors (see full log)" >> build_report.md
+          }
+
+          # ── Assembler check ──
+          echo "### Assembly Check" >> build_report.md
+          if ./gradlew assembleDebug 2>&1 | tee build_output.txt | tail -20 >> build_report.md; then
+            echo "✅ Build SUCCESS" >> build_report.md
+          else
+            echo "❌ Build FAILED" >> build_report.md
+            FAIL=1
+            # Extract error lines
+            echo "#### Build Errors:" >> build_report.md
+            grep -E "^(error:|FAILED|Exception|BUILD FAILED)" build_output.txt >> build_report.md || true
+          fi
+
+          # ── Gradle wrapper validation ──
+          echo "### Gradle Wrapper Validation" >> build_report.md
+          if [ -f "gradlew" ]; then
+            WRAPPER_JAR="gradle/wrapper/gradle-wrapper.jar"
+            if [ -f "$WRAPPER_JAR" ]; then
+              echo "✅ Gradle wrapper JAR present" >> build_report.md
+            else
+              echo "❌ Gradle wrapper JAR missing" >> build_report.md
+              FAIL=1
+            fi
+          fi
+
+          # ── NDK / C++ source check ──
+          echo "### NDK/Native Source Check" >> build_report.md
+          if [ -f "app/src/main/cpp/Android.mk" ]; then
+            echo "✅ Android.mk found" >> build_report.md
+            # Check for referenced .c files
+            MISSING_C=0
+            while IFS= read -r src; do
+              SRC_FILE="app/src/main/cpp/$src"
+              if [ ! -f "$SRC_FILE" ]; then
+                echo "❌ Missing C source: $src" >> build_report.md
+                MISSING_C=1
+              fi
+            done < <(grep "^LOCAL_SRC_FILES" app/src/main/cpp/Android.mk 2>/dev/null | sed 's/LOCAL_SRC_FILES\s*:=\s*//' | tr ' ' '\n' | grep '\.c$')
+            [ $MISSING_C -eq 0 ] && echo "✅ All native sources present" >> build_report.md
+          else
+            echo "⚠️  Android.mk not found (NDK build skipped)" >> build_report.md
+          fi
+
+          REPORT=$(cat build_report.md)
+          echo "status=$( [ $FAIL -eq 0 ] && echo pass || echo fail )" >> $GITHUB_OUTPUT
+          {
+            echo "report<<EOF"
+            echo "$REPORT"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Upload Build Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-report
+          path: build_report.md
+
+  # ──────────────────────────────────────────────
+  # 3. TEST SCAN
+  # ──────────────────────────────────────────────
+  test-scan:
+    name: Test Scan
+    runs-on: ubuntu-latest
+    needs: build-scan
+    outputs:
+      test_status: ${{ steps.tests.outputs.status }}
+      test_report: ${{ steps.tests.outputs.report }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      - name: Run Test Scan
+        id: tests
+        shell: bash
+        run: |
+          echo "## Test Scan" >> test_report.md
+          FAIL=0
+
+          # ── Unit tests ──
+          echo "### Unit Tests" >> test_report.md
+          if ./gradlew test 2>&1 | tee test_output.txt | tail -30 >> test_report.md; then
+            PASS=$(grep -c "tests were successful\|OK (" test_output.txt 2>/dev/null || echo 0)
+            echo "✅ Unit tests PASSED" >> test_report.md
+          else
+            echo "❌ Unit tests FAILED" >> test_report.md
+            FAIL=1
+            grep -E "FAILED|Error|Exception" test_output.txt | head -20 >> test_report.md || true
+          fi
+
+          # ── Check test result XMLs ──
+          echo "### Test Result Summary" >> test_report.md
+          find . -name "TEST-*.xml" -path "*/test-results/*" 2>/dev/null | while read f; do
+            TESTS=$(grep -o 'tests="[0-9]*"' "$f" | head -1 | grep -o '[0-9]*')
+            FAILURES=$(grep -o 'failures="[0-9]*"' "$f" | head -1 | grep -o '[0-9]*')
+            ERRORS=$(grep -o 'errors="[0-9]*"' "$f" | head -1 | grep -o '[0-9]*')
+            NAME=$(grep -o 'name="[^"]*"' "$f" | head -1 | sed 's/name="//;s/"//')
+            echo "- $NAME: $TESTS tests, $FAILURES failures, $ERRORS errors" >> test_report.md
+          done || echo "No test XML results found yet" >> test_report.md
+
+          REPORT=$(cat test_report.md)
+          echo "status=$( [ $FAIL -eq 0 ] && echo pass || echo fail )" >> $GITHUB_OUTPUT
+          {
+            echo "report<<EOF"
+            echo "$REPORT"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: |
+            test_report.md
+            **/build/test-results/**/*.xml
+            **/build/reports/tests/**
+
+  # ──────────────────────────────────────────────
+  # 4. TERMUX-SPECIFIC HEALTH CHECK
+  # ──────────────────────────────────────────────
+  termux-health-check:
+    name: Termux / NasTech Health Check
+    runs-on: ubuntu-latest
+    outputs:
+      termux_status: ${{ steps.health.outputs.status }}
+      termux_report: ${{ steps.health.outputs.report }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Termux Health Check
+        id: health
+        shell: bash
+        run: |
+          echo "## Termux / NasTech Health Check" >> termux_report.md
+          FAIL=0
+
+          # ── AndroidManifest checks ──
+          echo "### AndroidManifest Validation" >> termux_report.md
+          MANIFEST="app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ]; then
+            echo "✅ AndroidManifest present" >> termux_report.md
+            # Check critical permissions
+            for perm in "INTERNET" "READ_EXTERNAL_STORAGE" "WRITE_EXTERNAL_STORAGE"; do
+              if grep -q "$perm" "$MANIFEST"; then
+                echo "✅ Permission: $perm declared" >> termux_report.md
+              else
+                echo "ℹ️  Permission: $perm not declared (may be intentional)" >> termux_report.md
+              fi
+            done
+          else
+            echo "❌ AndroidManifest MISSING" >> termux_report.md
+            FAIL=1
+          fi
+
+          # ── Bootstrap integrity check ──
+          echo "### Bootstrap Configuration Check" >> termux_report.md
+          if grep -q "downloadBootstrap" app/build.gradle; then
+            echo "✅ Bootstrap download task defined" >> termux_report.md
+          else
+            echo "❌ Bootstrap download task missing from app/build.gradle" >> termux_report.md
+            FAIL=1
+          fi
+
+          # Check bootstrap versions are defined
+          if grep -q "apt-android-7\|apt-android-5" app/build.gradle; then
+            echo "✅ Package variants defined (apt-android-7, apt-android-5)" >> termux_report.md
+          else
+            echo "❌ Package variants missing" >> termux_report.md
+            FAIL=1
+          fi
+
+          # ── Module interconnect check ──
+          echo "### Module Dependency Graph" >> termux_report.md
+          echo '```' >> termux_report.md
+          echo "NasTech App" >> termux_report.md
+          echo " ├─ terminal-view" >> termux_report.md
+          if grep -q "terminal-view" app/build.gradle; then
+            echo "    ✅ linked" >> termux_report.md
+          else
+            echo "    ❌ NOT linked in app/build.gradle" >> termux_report.md
+            FAIL=1
+          fi
+          echo " ├─ termux-shared" >> termux_report.md
+          if grep -q "termux-shared" app/build.gradle; then
+            echo "    ✅ linked" >> termux_report.md
+          else
+            echo "    ❌ NOT linked in app/build.gradle" >> termux_report.md
+            FAIL=1
+          fi
+          echo " └─ terminal-emulator (via terminal-view)" >> termux_report.md
+          if grep -q "terminal-emulator" terminal-view/build.gradle 2>/dev/null; then
+            echo "    ✅ linked via terminal-view" >> termux_report.md
+          else
+            echo "    ⚠️  terminal-emulator not found in terminal-view/build.gradle" >> termux_report.md
+          fi
+          echo '```' >> termux_report.md
+
+          # ── NasTech AI dependencies check ──
+          echo "### NasTech AI Dependencies" >> termux_report.md
+          NASTECH_DEPS=(
+            "androidx.biometric:biometric"
+            "androidx.security:security-crypto"
+            "androidx.webkit:webkit"
+            "androidx.credentials:credentials"
+          )
+          for dep in "${NASTECH_DEPS[@]}"; do
+            if grep -q "$dep" app/build.gradle; then
+              echo "✅ $dep" >> termux_report.md
+            else
+              echo "❌ Missing NasTech dep: $dep" >> termux_report.md
+              FAIL=1
+            fi
+          done
+
+          # ── Signing config check ──
+          echo "### Signing Configuration" >> termux_report.md
+          if [ -f "app/testkey_untrusted.jks" ]; then
+            echo "✅ Debug keystore present" >> termux_report.md
+          else
+            echo "❌ Debug keystore missing: app/testkey_untrusted.jks" >> termux_report.md
+            FAIL=1
+          fi
+
+          # ── ProGuard rules check ──
+          echo "### ProGuard Rules" >> termux_report.md
+          for module in app terminal-view termux-shared terminal-emulator; do
+            if [ -f "$module/proguard-rules.pro" ]; then
+              echo "✅ $module/proguard-rules.pro" >> termux_report.md
+            else
+              echo "⚠️  $module/proguard-rules.pro missing (non-critical)" >> termux_report.md
+            fi
+          done
+
+          # ── Gradle wrapper integrity ──
+          echo "### Gradle Wrapper Integrity" >> termux_report.md
+          WRAPPER_PROPS="gradle/wrapper/gradle-wrapper.properties"
+          if [ -f "$WRAPPER_PROPS" ]; then
+            GRADLE_VER=$(grep "distributionUrl" "$WRAPPER_PROPS" | grep -o '[0-9]\+\.[0-9]\+\(\.[0-9]\+\)\?' | head -1)
+            echo "✅ Gradle wrapper: v$GRADLE_VER" >> termux_report.md
+          else
+            echo "❌ gradle-wrapper.properties missing" >> termux_report.md
+            FAIL=1
+          fi
+
+          # ── SDK / NDK version compatibility check ──
+          echo "### SDK/NDK Compatibility" >> termux_report.md
+          MIN_SDK=$(grep "minSdkVersion" gradle.properties | grep -o '[0-9]*')
+          TARGET_SDK=$(grep "targetSdkVersion" gradle.properties | grep -o '[0-9]*')
+          COMPILE_SDK=$(grep "compileSdkVersion" gradle.properties | grep -o '[0-9]*')
+          echo "  minSdkVersion    = $MIN_SDK" >> termux_report.md
+          echo "  targetSdkVersion = $TARGET_SDK" >> termux_report.md
+          echo "  compileSdkVersion= $COMPILE_SDK" >> termux_report.md
+          if [ "$MIN_SDK" -le "$TARGET_SDK" ] && [ "$TARGET_SDK" -le "$COMPILE_SDK" ]; then
+            echo "✅ SDK version chain valid" >> termux_report.md
+          else
+            echo "❌ SDK version chain invalid (min>target or target>compile)" >> termux_report.md
+            FAIL=1
+          fi
+
+          REPORT=$(cat termux_report.md)
+          echo "status=$( [ $FAIL -eq 0 ] && echo pass || echo fail )" >> $GITHUB_OUTPUT
+          {
+            echo "report<<EOF"
+            echo "$REPORT"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Upload Termux Health Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: termux-health-report
+          path: termux_report.md
+
+  # ──────────────────────────────────────────────
+  # 5. SECURITY SCAN
+  # ──────────────────────────────────────────────
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    outputs:
+      security_status: ${{ steps.security.outputs.status }}
+      security_report: ${{ steps.security.outputs.report }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Security Scan
+        id: security
+        shell: bash
+        run: |
+          echo "## Security Scan" >> security_report.md
+          FAIL=0
+
+          # ── Hardcoded secrets scan ──
+          echo "### Hardcoded Secrets Check" >> security_report.md
+          SECRET_PATTERNS=(
+            "password\s*=\s*['\"][^'\"]{8,}"
+            "api_key\s*=\s*['\"][^'\"]+"
+            "secret\s*=\s*['\"][^'\"]+"
+            "token\s*=\s*['\"][^'\"]+"
+            "private_key"
+            "-----BEGIN RSA"
+          )
+          SECRET_FOUND=0
+          for pat in "${SECRET_PATTERNS[@]}"; do
+            HITS=$(grep -rniE "$pat" --include="*.java" --include="*.kt" --include="*.gradle" \
+              --exclude-dir=".git" --exclude-dir="build" . 2>/dev/null \
+              | grep -v "testkey\|test_\|//\|\.jks\|proguard\|storePassword\|keyPassword" || true)
+            if [ -n "$HITS" ]; then
+              echo "⚠️  Potential secret pattern '$pat':" >> security_report.md
+              echo "$HITS" | head -5 >> security_report.md
+              SECRET_FOUND=1
+            fi
+          done
+          [ $SECRET_FOUND -eq 0 ] && echo "✅ No hardcoded secrets detected" >> security_report.md
+
+          # ── Debug keystore in repo warning ──
+          echo "### Keystore Security" >> security_report.md
+          if [ -f "app/testkey_untrusted.jks" ]; then
+            echo "⚠️  app/testkey_untrusted.jks is committed (OK for debug, NOT for production)" >> security_report.md
+          fi
+
+          # ── World-readable vulnerability check ──
+          echo "### World-Readable Vulnerability" >> security_report.md
+          if grep -rn "MODE_WORLD_READABLE\|MODE_WORLD_WRITEABLE" --include="*.java" --include="*.kt" . 2>/dev/null | grep -v "//"; then
+            echo "❌ World-readable/writable file mode found — critical vulnerability" >> security_report.md
+            FAIL=1
+          else
+            echo "✅ No world-readable file modes found" >> security_report.md
+          fi
+
+          # ── Network cleartext check ──
+          echo "### Network Security" >> security_report.md
+          if grep -rn "usesCleartextTraffic=\"true\"\|http://" \
+            --include="*.xml" --include="*.java" --include="*.kt" \
+            --exclude-dir=".git" --exclude-dir="build" . 2>/dev/null \
+            | grep -v "//\|localhost\|127.0.0.1\|schema\|xmlns" | head -10; then
+            echo "⚠️  Cleartext HTTP usage found — consider HTTPS" >> security_report.md
+          else
+            echo "✅ No cleartext HTTP detected" >> security_report.md
+          fi
+
+          # ── Permission over-request check ──
+          echo "### Permission Audit" >> security_report.md
+          DANGEROUS_PERMS=(
+            "READ_CONTACTS"
+            "WRITE_CONTACTS"
+            "READ_CALL_LOG"
+            "PROCESS_OUTGOING_CALLS"
+            "SEND_SMS"
+            "RECEIVE_SMS"
+            "CAMERA"
+            "RECORD_AUDIO"
+            "ACCESS_FINE_LOCATION"
+          )
+          for perm in "${DANGEROUS_PERMS[@]}"; do
+            if grep -q "$perm" app/src/main/AndroidManifest.xml 2>/dev/null; then
+              echo "⚠️  Dangerous permission declared: $perm — verify it is necessary" >> security_report.md
+            fi
+          done
+          echo "✅ Permission audit complete" >> security_report.md
+
+          REPORT=$(cat security_report.md)
+          echo "status=$( [ $FAIL -eq 0 ] && echo pass || echo fail )" >> $GITHUB_OUTPUT
+          {
+            echo "report<<EOF"
+            echo "$REPORT"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Upload Security Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: security_report.md
+
+  # ──────────────────────────────────────────────
+  # 6. ISSUE REPORTER — posts combined report
+  # ──────────────────────────────────────────────
+  issue-reporter:
+    name: Issue Report
+    runs-on: ubuntu-latest
+    needs:
+      - dependency-scan
+      - build-scan
+      - test-scan
+      - termux-health-check
+      - security-scan
+    if: always()
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Post Combined Report to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const dep    = `${{ needs.dependency-scan.outputs.dep_status }}`;
+            const build  = `${{ needs.build-scan.outputs.build_status }}`;
+            const test   = `${{ needs.test-scan.outputs.test_status }}`;
+            const termux = `${{ needs.termux-health-check.outputs.termux_status }}`;
+            const sec    = `${{ needs.security-scan.outputs.security_status }}`;
+
+            const icon = s => s === 'pass' ? '✅' : s === 'fail' ? '❌' : '⚠️';
+
+            const body = [
+              '## 🤖 NasTech Doctor Report',
+              '',
+              '| Check | Status |',
+              '|-------|--------|',
+              `| Dependency Scan     | ${icon(dep)}    \`${dep}\`    |`,
+              `| Build Scan          | ${icon(build)}  \`${build}\`  |`,
+              `| Test Scan           | ${icon(test)}   \`${test}\`   |`,
+              `| Termux Health       | ${icon(termux)} \`${termux}\` |`,
+              `| Security Scan       | ${icon(sec)}    \`${sec}\`    |`,
+              '',
+              '> Full reports are available as workflow artifacts.',
+              '',
+              '---',
+              '*Powered by NasTech Doctor — run `nastech doctor` locally for the same checks.*'
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+
+      - name: Create GitHub Issue on Failure
+        if: |
+          github.event_name == 'push' &&
+          (needs.dependency-scan.outputs.dep_status == 'fail' ||
+           needs.build-scan.outputs.build_status == 'fail' ||
+           needs.test-scan.outputs.test_status == 'fail' ||
+           needs.termux-health-check.outputs.termux_status == 'fail' ||
+           needs.security-scan.outputs.security_status == 'fail')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const dep    = `${{ needs.dependency-scan.outputs.dep_status }}`;
+            const build  = `${{ needs.build-scan.outputs.build_status }}`;
+            const test   = `${{ needs.test-scan.outputs.test_status }}`;
+            const termux = `${{ needs.termux-health-check.outputs.termux_status }}`;
+            const sec    = `${{ needs.security-scan.outputs.security_status }}`;
+            const sha    = context.sha.substring(0, 7);
+            const run    = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const icon = s => s === 'pass' ? '✅' : '❌';
+            const title = `🤖 NasTech Doctor: failures detected on \`${sha}\``;
+
+            const body = [
+              `## NasTech Doctor — Automated Health Report`,
+              `**Commit:** \`${sha}\` · **Branch:** \`${context.ref.replace('refs/heads/','')}\``,
+              `**Run:** [View full logs](${run})`,
+              '',
+              '| Check | Status |',
+              '|-------|--------|',
+              `| Dependency Scan | ${icon(dep)}    |`,
+              `| Build Scan      | ${icon(build)}  |`,
+              `| Test Scan       | ${icon(test)}   |`,
+              `| Termux Health   | ${icon(termux)} |`,
+              `| Security Scan   | ${icon(sec)}    |`,
+              '',
+              '### Auto-Fix Suggestions',
+              dep === 'fail'    ? '- **Deps:** Run `./gradlew :app:dependencies` to find resolution errors. Check version conflicts in `build.gradle`.' : '',
+              build === 'fail'  ? '- **Build:** Run `./gradlew assembleDebug --stacktrace` locally. Check `app/build.gradle` for incompatible API levels.' : '',
+              test === 'fail'   ? '- **Tests:** Run `./gradlew test` locally. Check test XML reports in `app/build/test-results/`.' : '',
+              termux === 'fail' ? '- **Termux:** Run `nastech doctor` in your Termux environment. Verify bootstrap zips and module links in `settings.gradle`.' : '',
+              sec === 'fail'    ? '- **Security:** Audit `AndroidManifest.xml` for `MODE_WORLD_READABLE`. Check for exposed credentials.' : '',
+              '',
+              '> *Auto-generated by NasTech Doctor Bot. Close this issue once resolved.*'
+            ].filter(Boolean).join('\n');
+
+            // Check for existing open bot issue to avoid duplicates
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'nastech-bot'
+            });
+
+            const botIssues = existing.data.filter(i => i.title.includes('NasTech Doctor'));
+            if (botIssues.length > 0) {
+              // Update existing issue
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: botIssues[0].number,
+                body: `### Updated Report — \`${sha}\`\n\n${body}`
+              });
+            } else {
+              // Create new issue
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['nastech-bot', 'bug']
+              });
+            }
