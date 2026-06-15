@@ -1,0 +1,621 @@
+name: NasTech Guardian — Orchestrator
+
+# ═══════════════════════════════════════════════════════════════
+#  NasTech Guardian — Sequential State Machine
+#  IDLE → VERIFY → IDENTIFY → SCAN → BUILD → FIX → VERIFY → RELEASE → NOTIFY → COMPLETE
+#  One stage at a time. If a stage fails → STOP → Telegram → Wait.
+# ═══════════════════════════════════════════════════════════════
+
+on:
+  push:
+    branches: [ master, main, 'github-releases/**' ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+    inputs:
+      skip_to_stage:
+        description: 'Skip to stage (identity/dependency/health/build/repair/release)'
+        required: false
+        default: 'identity'
+      force_repair:
+        description: 'Force repair stage even if build passes'
+        required: false
+        default: 'false'
+      dry_run:
+        description: 'Dry run (no PRs, no releases)'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  checks: write
+
+env:
+  GUARDIAN_VERSION: "1.0.0"
+  GUARDIAN_ORG: "nastech-ai"
+  PYTHON_VERSION: "3.11"
+
+# ─────────────────────────────────────────────────────────────────
+# STAGE 0 — VERIFY ORGANIZATION
+# ─────────────────────────────────────────────────────────────────
+jobs:
+  verify-org:
+    name: "Stage 0 · Verify Organization"
+    runs-on: ubuntu-latest
+    outputs:
+      org_verified: ${{ steps.verify.outputs.verified }}
+      repo_owner:   ${{ steps.verify.outputs.owner }}
+      repo_name:    ${{ steps.verify.outputs.repo }}
+      is_archived:  ${{ steps.verify.outputs.archived }}
+      guardian_run_id: ${{ steps.verify.outputs.run_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Organization & Repository
+        id: verify
+        shell: bash
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          REPO="${{ github.event.repository.name }}"
+          ARCHIVED="${{ github.event.repository.archived }}"
+          RUN_ID="${{ github.run_id }}"
+
+          echo "owner=$OWNER"       >> $GITHUB_OUTPUT
+          echo "repo=$REPO"         >> $GITHUB_OUTPUT
+          echo "archived=$ARCHIVED" >> $GITHUB_OUTPUT
+          echo "run_id=$RUN_ID"     >> $GITHUB_OUTPUT
+
+          if [ "$ARCHIVED" = "true" ]; then
+            echo "verified=false" >> $GITHUB_OUTPUT
+            echo "::error::Repository is archived — Guardian will not run on archived repos"
+            exit 1
+          fi
+
+          echo "verified=true" >> $GITHUB_OUTPUT
+
+          cat > guardian_state.json << EOF
+          {
+            "guardian_version": "${{ env.GUARDIAN_VERSION }}",
+            "organization": "$OWNER",
+            "repository": "$REPO",
+            "run_id": "$RUN_ID",
+            "sha": "${{ github.sha }}",
+            "ref": "${{ github.ref }}",
+            "event": "${{ github.event_name }}",
+            "stage": "VERIFY_REPO",
+            "status": "pass",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "guardian_enabled": true
+          }
+          EOF
+
+          echo "✅ Organization: $OWNER"
+          echo "✅ Repository: $REPO"
+          echo "✅ Guardian State initialized"
+
+      - name: Upload Guardian State
+        uses: actions/upload-artifact@v4
+        with:
+          name: guardian-state-verify
+          path: guardian_state.json
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────
+  # STAGE 1 — IDENTITY BOT
+  # ─────────────────────────────────────────────────────────────────
+  identity-bot:
+    name: "Stage 1 · Identity Bot"
+    runs-on: ubuntu-latest
+    needs: verify-org
+    if: needs.verify-org.outputs.org_verified == 'true'
+    outputs:
+      profile:        ${{ steps.identity.outputs.profile }}
+      language_stack: ${{ steps.identity.outputs.language_stack }}
+      build_system:   ${{ steps.identity.outputs.build_system }}
+      pkg_manager:    ${{ steps.identity.outputs.pkg_manager }}
+      ci_system:      ${{ steps.identity.outputs.ci_system }}
+      priority:       ${{ steps.identity.outputs.priority }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Run Identity Bot
+        id: identity
+        shell: bash
+        run: |
+          python3 scripts/guardian/identity_bot.py \
+            --owner "${{ needs.verify-org.outputs.repo_owner }}" \
+            --repo  "${{ needs.verify-org.outputs.repo_name }}" \
+            --sha   "${{ github.sha }}" \
+            --output identity_profile.json
+
+          # Read outputs
+          LANG=$(python3 -c "import json; d=json.load(open('identity_profile.json')); print(d.get('language_stack','unknown'))")
+          BUILD=$(python3 -c "import json; d=json.load(open('identity_profile.json')); print(d.get('build_system','unknown'))")
+          PKG=$(python3 -c "import json; d=json.load(open('identity_profile.json')); print(d.get('package_manager','unknown'))")
+          CI=$(python3 -c "import json; d=json.load(open('identity_profile.json')); print(d.get('ci_system','github-actions'))")
+          PRI=$(python3 -c "import json; d=json.load(open('identity_profile.json')); print(d.get('priority','normal'))")
+          PROFILE=$(cat identity_profile.json)
+
+          echo "language_stack=$LANG"  >> $GITHUB_OUTPUT
+          echo "build_system=$BUILD"   >> $GITHUB_OUTPUT
+          echo "pkg_manager=$PKG"      >> $GITHUB_OUTPUT
+          echo "ci_system=$CI"         >> $GITHUB_OUTPUT
+          echo "priority=$PRI"         >> $GITHUB_OUTPUT
+          {
+            echo "profile<<EOF"
+            echo "$PROFILE"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+          cat identity_profile.json
+
+      - name: Upload Identity Profile
+        uses: actions/upload-artifact@v4
+        with:
+          name: guardian-identity-profile
+          path: identity_profile.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # STAGE 2 — DEPENDENCY BOT
+  # ─────────────────────────────────────────────────────────────────
+  dependency-bot:
+    name: "Stage 2 · Dependency Bot"
+    runs-on: ubuntu-latest
+    needs: identity-bot
+    outputs:
+      dep_status:  ${{ steps.deps.outputs.status }}
+      missing:     ${{ steps.deps.outputs.missing }}
+      conflicts:   ${{ steps.deps.outputs.conflicts }}
+      broken:      ${{ steps.deps.outputs.broken }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*') }}
+
+      - name: Download Identity Profile
+        uses: actions/download-artifact@v4
+        with:
+          name: guardian-identity-profile
+
+      - name: Run Dependency Bot
+        id: deps
+        shell: bash
+        run: |
+          python3 scripts/guardian/dependency_bot.py \
+            --profile identity_profile.json \
+            --output  dependency_report.json
+
+          STATUS=$(python3 -c "import json; print(json.load(open('dependency_report.json'))['status'])")
+          MISSING=$(python3 -c "import json; print(len(json.load(open('dependency_report.json')).get('missing',[])))")
+          CONFLICTS=$(python3 -c "import json; print(len(json.load(open('dependency_report.json')).get('conflicts',[])))")
+          BROKEN=$(python3 -c "import json; print(len(json.load(open('dependency_report.json')).get('broken',[])))")
+
+          echo "status=$STATUS"       >> $GITHUB_OUTPUT
+          echo "missing=$MISSING"     >> $GITHUB_OUTPUT
+          echo "conflicts=$CONFLICTS" >> $GITHUB_OUTPUT
+          echo "broken=$BROKEN"       >> $GITHUB_OUTPUT
+
+          python3 -m json.tool dependency_report.json
+
+      - name: Upload Dependency Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guardian-dependency-report
+          path: dependency_report.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # STAGE 3 — HEALTH BOT
+  # ─────────────────────────────────────────────────────────────────
+  health-bot:
+    name: "Stage 3 · Health Bot"
+    runs-on: ubuntu-latest
+    needs: dependency-bot
+    outputs:
+      health_status:  ${{ steps.health.outputs.status }}
+      issues_found:   ${{ steps.health.outputs.issues_found }}
+      critical_count: ${{ steps.health.outputs.critical_count }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download Identity Profile
+        uses: actions/download-artifact@v4
+        with:
+          name: guardian-identity-profile
+
+      - name: Run Health Bot
+        id: health
+        shell: bash
+        run: |
+          python3 scripts/guardian/health_bot.py \
+            --profile identity_profile.json \
+            --output  health_report.json
+
+          STATUS=$(python3 -c "import json; print(json.load(open('health_report.json'))['status'])")
+          ISSUES=$(python3 -c "import json; print(json.load(open('health_report.json')).get('issues_found', 0))")
+          CRITICAL=$(python3 -c "import json; print(json.load(open('health_report.json')).get('critical_count', 0))")
+
+          echo "status=$STATUS"           >> $GITHUB_OUTPUT
+          echo "issues_found=$ISSUES"     >> $GITHUB_OUTPUT
+          echo "critical_count=$CRITICAL" >> $GITHUB_OUTPUT
+
+          python3 -m json.tool health_report.json
+
+      - name: STOP — Health Critical
+        if: steps.health.outputs.critical_count != '0'
+        run: |
+          echo "::error::Health Bot found ${{ steps.health.outputs.critical_count }} critical issues. Stopping pipeline."
+          exit 1
+
+      - name: Upload Health Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guardian-health-report
+          path: health_report.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # STAGE 4 — BUILD BOT
+  # ─────────────────────────────────────────────────────────────────
+  build-bot:
+    name: "Stage 4 · Build Bot"
+    runs-on: ubuntu-latest
+    needs: health-bot
+    outputs:
+      build_status:  ${{ steps.build.outputs.status }}
+      build_errors:  ${{ steps.build.outputs.error_count }}
+      apk_produced:  ${{ steps.build.outputs.apk_produced }}
+      failure_reason: ${{ steps.build.outputs.failure_reason }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*') }}
+
+      - name: Download Identity Profile
+        uses: actions/download-artifact@v4
+        with:
+          name: guardian-identity-profile
+
+      - name: Run Build Bot
+        id: build
+        shell: bash
+        env:
+          TERMUX_PACKAGE_VARIANT: apt-android-7
+        run: |
+          python3 scripts/guardian/build_bot.py \
+            --profile identity_profile.json \
+            --output  build_report.json
+
+          STATUS=$(python3 -c "import json; print(json.load(open('build_report.json'))['status'])")
+          ERRORS=$(python3 -c "import json; print(json.load(open('build_report.json')).get('error_count', 0))")
+          APK=$(python3 -c "import json; print(json.load(open('build_report.json')).get('apk_produced', False))")
+          REASON=$(python3 -c "import json; print(json.load(open('build_report.json')).get('failure_reason', ''))")
+
+          echo "status=$STATUS"          >> $GITHUB_OUTPUT
+          echo "error_count=$ERRORS"     >> $GITHUB_OUTPUT
+          echo "apk_produced=$APK"       >> $GITHUB_OUTPUT
+          echo "failure_reason=$REASON"  >> $GITHUB_OUTPUT
+
+          python3 -m json.tool build_report.json
+
+      - name: Upload Build Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guardian-build-report
+          path: |
+            build_report.json
+            app/build/outputs/apk/**/*.apk
+
+  # ─────────────────────────────────────────────────────────────────
+  # STAGE 5 — REPAIR BOT  (only if build failed OR force_repair=true)
+  # ─────────────────────────────────────────────────────────────────
+  repair-bot:
+    name: "Stage 5 · Repair Bot"
+    runs-on: ubuntu-latest
+    needs: build-bot
+    if: |
+      needs.build-bot.outputs.build_status == 'fail' ||
+      github.event.inputs.force_repair == 'true'
+    outputs:
+      repair_status: ${{ steps.repair.outputs.status }}
+      pr_number:     ${{ steps.repair.outputs.pr_number }}
+      pr_url:        ${{ steps.repair.outputs.pr_url }}
+      patch_count:   ${{ steps.repair.outputs.patch_count }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download Reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: guardian-*-report
+          merge-multiple: true
+
+      - name: Run Repair Bot
+        id: repair
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          python3 scripts/guardian/repair_bot.py \
+            --build-report   build_report.json \
+            --health-report  health_report.json \
+            --dep-report     dependency_report.json \
+            --repo           "${{ github.repository }}" \
+            --sha            "${{ github.sha }}" \
+            --output         repair_report.json
+
+          STATUS=$(python3 -c "import json; print(json.load(open('repair_report.json'))['status'])")
+          PR=$(python3 -c "import json; print(json.load(open('repair_report.json')).get('pr_number',''))")
+          PR_URL=$(python3 -c "import json; print(json.load(open('repair_report.json')).get('pr_url',''))")
+          PATCHES=$(python3 -c "import json; print(json.load(open('repair_report.json')).get('patch_count',0))")
+
+          echo "status=$STATUS"       >> $GITHUB_OUTPUT
+          echo "pr_number=$PR"        >> $GITHUB_OUTPUT
+          echo "pr_url=$PR_URL"       >> $GITHUB_OUTPUT
+          echo "patch_count=$PATCHES" >> $GITHUB_OUTPUT
+
+          python3 -m json.tool repair_report.json
+
+      - name: Upload Repair Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guardian-repair-report
+          path: repair_report.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # STAGE 6 — RELEASE BOT  (only on main/master push when build passes)
+  # ─────────────────────────────────────────────────────────────────
+  release-bot:
+    name: "Stage 6 · Release Bot"
+    runs-on: ubuntu-latest
+    needs: build-bot
+    if: |
+      needs.build-bot.outputs.build_status == 'pass' &&
+      needs.build-bot.outputs.apk_produced == 'True' &&
+      (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') &&
+      github.event_name != 'pull_request' &&
+      github.event.inputs.dry_run != 'true'
+    outputs:
+      release_status:  ${{ steps.release.outputs.status }}
+      release_url:     ${{ steps.release.outputs.release_url }}
+      release_tag:     ${{ steps.release.outputs.release_tag }}
+      changelog_lines: ${{ steps.release.outputs.changelog_lines }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: guardian-*
+          merge-multiple: true
+
+      - name: Run Release Bot
+        id: release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/guardian/release_bot.py \
+            --repo  "${{ github.repository }}" \
+            --sha   "${{ github.sha }}" \
+            --output release_report.json
+
+          STATUS=$(python3 -c "import json; print(json.load(open('release_report.json'))['status'])")
+          TAG=$(python3 -c "import json; print(json.load(open('release_report.json')).get('release_tag',''))")
+          URL=$(python3 -c "import json; print(json.load(open('release_report.json')).get('release_url',''))")
+          LINES=$(python3 -c "import json; print(json.load(open('release_report.json')).get('changelog_lines',0))")
+
+          echo "status=$STATUS"            >> $GITHUB_OUTPUT
+          echo "release_tag=$TAG"          >> $GITHUB_OUTPUT
+          echo "release_url=$URL"          >> $GITHUB_OUTPUT
+          echo "changelog_lines=$LINES"    >> $GITHUB_OUTPUT
+
+      - name: Upload Release Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guardian-release-report
+          path: release_report.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # STAGE 7 — NOTIFICATION BOT  (always runs)
+  # ─────────────────────────────────────────────────────────────────
+  notify-bot:
+    name: "Stage 7 · Notification Bot"
+    runs-on: ubuntu-latest
+    needs:
+      - verify-org
+      - identity-bot
+      - dependency-bot
+      - health-bot
+      - build-bot
+      - repair-bot
+      - release-bot
+    if: always()
+    outputs:
+      final_state: ${{ steps.notify.outputs.final_state }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install notification deps
+        run: pip install requests --quiet
+
+      - name: Download All Reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: guardian-*
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Run Notification Bot
+        id: notify
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_TOKEN:       ${{ secrets.GITHUB_TOKEN }}
+          VERIFY_STATUS:      ${{ needs.verify-org.result }}
+          IDENTITY_STATUS:    ${{ needs.identity-bot.result }}
+          DEP_STATUS:         ${{ needs.dependency-bot.outputs.dep_status }}
+          HEALTH_STATUS:      ${{ needs.health-bot.outputs.health_status }}
+          BUILD_STATUS:       ${{ needs.build-bot.outputs.build_status }}
+          REPAIR_STATUS:      ${{ needs.repair-bot.outputs.repair_status }}
+          REPAIR_PR:          ${{ needs.repair-bot.outputs.pr_url }}
+          RELEASE_STATUS:     ${{ needs.release-bot.outputs.release_status }}
+          RELEASE_URL:        ${{ needs.release-bot.outputs.release_url }}
+          RELEASE_TAG:        ${{ needs.release-bot.outputs.release_tag }}
+          REPO:               ${{ github.repository }}
+          SHA:                ${{ github.sha }}
+          RUN_URL:            "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        run: |
+          python3 scripts/guardian/notify_bot.py \
+            --repo   "$REPO" \
+            --sha    "$SHA" \
+            --run-url "$RUN_URL" \
+            --output notify_report.json
+
+          STATE=$(python3 -c "import json; print(json.load(open('notify_report.json')).get('final_state','COMPLETE'))" 2>/dev/null || echo "COMPLETE")
+          echo "final_state=$STATE" >> $GITHUB_OUTPUT
+
+      - name: Post GitHub Summary
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          DEP_STATUS:      ${{ needs.dependency-bot.outputs.dep_status }}
+          HEALTH_STATUS:   ${{ needs.health-bot.outputs.health_status }}
+          BUILD_STATUS:    ${{ needs.build-bot.outputs.build_status }}
+          REPAIR_PR:       ${{ needs.repair-bot.outputs.pr_url }}
+          RELEASE_URL:     ${{ needs.release-bot.outputs.release_url }}
+          RELEASE_TAG:     ${{ needs.release-bot.outputs.release_tag }}
+        with:
+          script: |
+            const s = x => ({pass:'✅',fail:'❌',success:'✅',skipped:'⏭️'}[x]||'⚠️');
+            const verifyR   = '${{ needs.verify-org.result }}';
+            const identityR = '${{ needs.identity-bot.result }}';
+            const depR      = '${{ needs.dependency-bot.result }}';
+            const healthR   = '${{ needs.health-bot.result }}';
+            const buildR    = '${{ needs.build-bot.result }}';
+            const repairR   = '${{ needs.repair-bot.result }}';
+            const releaseR  = '${{ needs.release-bot.result }}';
+            const sha       = '${{ github.sha }}'.substring(0,7);
+            const runUrl    = `https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+
+            const body = [
+              `## 🛡️ NasTech Guardian Report — \`${sha}\``,
+              '',
+              '| Stage | Agent | Status |',
+              '|-------|-------|--------|',
+              `| 0 | Verify Organization | ${s(verifyR)} \`${verifyR}\` |`,
+              `| 1 | Identity Bot        | ${s(identityR)} \`${identityR}\` |`,
+              `| 2 | Dependency Bot      | ${s(depR)} \`${depR}\` |`,
+              `| 3 | Health Bot          | ${s(healthR)} \`${healthR}\` |`,
+              `| 4 | Build Bot           | ${s(buildR)} \`${buildR}\` |`,
+              `| 5 | Repair Bot          | ${s(repairR)} \`${repairR}\` |`,
+              `| 6 | Release Bot         | ${s(releaseR)} \`${releaseR}\` |`,
+              '',
+              process.env.REPAIR_PR  ? `🔧 **Repair PR:** ${process.env.REPAIR_PR}` : '',
+              process.env.RELEASE_URL ? `🚀 **Release:** [${process.env.RELEASE_TAG}](${process.env.RELEASE_URL})` : '',
+              '',
+              `[📋 Full logs](${runUrl})`,
+              '',
+              '---',
+              '*NasTech Guardian · Sequential State Machine Orchestrator*'
+            ].filter(x => x !== undefined).join('\n');
+
+            if (context.payload.pull_request) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body
+              });
+            }
+
+      - name: Upload Notify Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guardian-notify-report
+          path: notify_report.json
