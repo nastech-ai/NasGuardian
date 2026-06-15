@@ -1,0 +1,379 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║   NasTech Guardian — Termux Installer v2.0                      ║
+# ║   Installs everything + keeps the bot always live                ║
+# ║   Run once: bash scripts/termux_install.sh                      ║
+# ╚══════════════════════════════════════════════════════════════════╝
+set -euo pipefail
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+
+log()  { echo -e "${GREEN}[✓]${NC} $*"; }
+warn() { echo -e "${YELLOW}[!]${NC} $*"; }
+err()  { echo -e "${RED}[✗]${NC} $*"; }
+info() { echo -e "${BLUE}[→]${NC} $*"; }
+
+# ── Detect Termux ───────────────────────────────────────────────────
+if [ ! -d "/data/data/com.termux" ]; then
+  warn "Not running inside Termux. Continuing anyway (Linux mode)."
+  TERMUX_MODE=false
+  HOME_DIR="$HOME"
+  PREFIX="/usr"
+else
+  TERMUX_MODE=true
+  HOME_DIR="/data/data/com.termux/files/home"
+  PREFIX="/data/data/com.termux/files/usr"
+fi
+
+INSTALL_DIR="$HOME_DIR/nastech-guardian"
+BOT_DIR="$INSTALL_DIR/scripts/telegram_bot"
+BOOT_DIR="$HOME_DIR/.termux/boot"
+ENV_FILE="$HOME_DIR/.nastech_env"
+
+echo ""
+echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════╗${NC}"
+echo -e "${BOLD}${CYAN}║   🛡️  NasTech Guardian — Termux Installer     ║${NC}"
+echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════╝${NC}"
+echo ""
+
+# ── Step 1: Update packages ─────────────────────────────────────────
+info "Updating package lists..."
+if $TERMUX_MODE; then
+  pkg update -y 2>/dev/null || apt-get update -y 2>/dev/null || warn "pkg update failed (non-fatal)"
+else
+  apt-get update -y 2>/dev/null || warn "apt update failed (non-fatal)"
+fi
+log "Package lists updated"
+
+# ── Step 2: Install system packages ────────────────────────────────
+info "Installing system packages..."
+
+PKGS_TERMUX=(
+  python git curl wget tmux openssh
+  termux-api nano vim
+  libxml2 libxslt libjpeg-turbo libpng
+  ffmpeg
+)
+PKGS_LINUX=(python3 python3-pip git curl wget tmux openssh-client nano vim)
+
+if $TERMUX_MODE; then
+  pkg install -y "${PKGS_TERMUX[@]}" 2>/dev/null || {
+    warn "Batch install failed — trying one by one..."
+    for p in "${PKGS_TERMUX[@]}"; do
+      pkg install -y "$p" 2>/dev/null && log "$p installed" || warn "$p failed (skip)"
+    done
+  }
+else
+  apt-get install -y "${PKGS_LINUX[@]}" 2>/dev/null || warn "Some Linux packages failed"
+fi
+log "System packages installed"
+
+# ── Step 3: Install Python packages ────────────────────────────────
+info "Installing Python packages..."
+pip install --quiet --upgrade pip 2>/dev/null || true
+pip install --quiet \
+  'python-telegram-bot>=20.7' \
+  requests \
+  'apscheduler>=3.10.0' \
+  pillow \
+  'pytesseract' \
+  2>/dev/null || warn "Some Python packages failed — continuing"
+
+# Core only (always needed)
+pip install --quiet 'python-telegram-bot>=20.7' requests 'apscheduler>=3.10.0'
+log "Python packages installed"
+
+# ── Step 4: Install GitHub CLI ─────────────────────────────────────
+info "Installing GitHub CLI..."
+if ! command -v gh &>/dev/null; then
+  if $TERMUX_MODE; then
+    pkg install -y gh 2>/dev/null && log "gh CLI installed" || warn "gh CLI not available in this Termux — skip"
+  else
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | \
+      sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null || true
+    warn "gh CLI: install manually from https://cli.github.com"
+  fi
+else
+  log "gh CLI already installed: $(gh --version | head -1)"
+fi
+
+# ── Step 5: Clone / update NasTech Guardian ────────────────────────
+info "Setting up NasTech Guardian..."
+if [ -d "$INSTALL_DIR/.git" ]; then
+  info "Updating existing installation..."
+  git -C "$INSTALL_DIR" pull --ff-only 2>/dev/null && log "Pulled latest changes" || warn "Git pull failed — using existing"
+else
+  info "Cloning nastech-ai/NasTerminal..."
+  git clone https://github.com/nastech-ai/NasTerminal.git "$INSTALL_DIR" 2>/dev/null || {
+    warn "Clone failed — using current directory"
+    INSTALL_DIR="$(pwd)"
+    BOT_DIR="$INSTALL_DIR/scripts/telegram_bot"
+  }
+fi
+log "NasTech Guardian at: $INSTALL_DIR"
+
+# ── Step 6: Create env file ─────────────────────────────────────────
+info "Setting up environment variables..."
+
+# Prompt for missing values interactively
+prompt_secret() {
+  local var="$1" desc="$2"
+  if [ -z "${!var:-}" ]; then
+    echo -e "${YELLOW}Enter $desc (press Enter to skip):${NC}"
+    read -rs value
+    if [ -n "$value" ]; then
+      echo "export $var='$value'" >> "$ENV_FILE"
+      echo ""
+      log "$var saved"
+    else
+      echo ""
+      warn "$var skipped"
+    fi
+  else
+    grep -q "^export $var=" "$ENV_FILE" 2>/dev/null || echo "export $var='${!var}'" >> "$ENV_FILE"
+    log "$var already set"
+  fi
+}
+
+# Create/clear env file
+cat > "$ENV_FILE" << 'ENVEOF'
+# NasTech Guardian Environment
+# Auto-generated by termux_install.sh
+# Edit this file to update credentials: nano ~/.nastech_env
+ENVEOF
+chmod 600 "$ENV_FILE"
+
+echo ""
+echo -e "${BOLD}=== API Keys Setup ===${NC}"
+echo "These are needed for the bot to work. You can update them later in:"
+echo "  $ENV_FILE"
+echo ""
+
+prompt_secret TELEGRAM_BOT_TOKEN "Telegram Bot Token (from @BotFather)"
+prompt_secret TELEGRAM_CHAT_ID   "Your Telegram Chat ID (from @userinfobot)"
+prompt_secret GROQ_API_KEY       "Groq API Key"
+prompt_secret GEMINI_API_KEY     "Gemini API Key"
+prompt_secret OPENROUTER_API_KEY "OpenRouter API Key"
+prompt_secret GITHUB_TOKEN       "GitHub Personal Access Token"
+
+# Default repo
+echo "export GITHUB_REPO='nastech-ai/NasTerminal'" >> "$ENV_FILE"
+echo "export NASTECH_INSTALL_DIR='$INSTALL_DIR'"   >> "$ENV_FILE"
+
+log "Environment file created at $ENV_FILE"
+
+# Source in shell profiles
+for profile in "$HOME_DIR/.bashrc" "$HOME_DIR/.profile" "$HOME_DIR/.bash_profile"; do
+  if [ -f "$profile" ] || [ "$profile" = "$HOME_DIR/.bashrc" ]; then
+    if ! grep -q "nastech_env" "$profile" 2>/dev/null; then
+      echo "[ -f ~/.nastech_env ] && source ~/.nastech_env" >> "$profile"
+      log "Added env source to $(basename $profile)"
+    fi
+  fi
+done
+
+# ── Step 7: Create start/stop scripts ──────────────────────────────
+info "Creating control scripts..."
+
+cat > "$HOME_DIR/nastech-start.sh" << STARTEOF
+#!/data/data/com.termux/files/usr/bin/bash
+# NasTech Guardian Bot — Start
+source "\$HOME/.nastech_env" 2>/dev/null || true
+INSTALL_DIR="\${NASTECH_INSTALL_DIR:-$INSTALL_DIR}"
+
+echo "🛡️  Starting NasTech Guardian Bot..."
+echo "   Repo: \${GITHUB_REPO:-nastech-ai/NasTerminal}"
+
+# Keep wake lock
+$($TERMUX_MODE && echo 'termux-wake-lock 2>/dev/null || true')
+
+# Start in tmux session
+SESSION="nastech-guardian"
+if tmux has-session -t "\$SESSION" 2>/dev/null; then
+  echo "⚠️  Session already running! Use: nastech-stop to restart."
+  tmux attach -t "\$SESSION"
+  exit 0
+fi
+
+tmux new-session -d -s "\$SESSION" -x 200 -y 50
+tmux send-keys -t "\$SESSION" "source ~/.nastech_env && cd '$INSTALL_DIR' && python3 scripts/telegram_bot/nastech_guardian_bot.py" Enter
+echo "✅ Bot started in tmux session: \$SESSION"
+echo "   Attach:  tmux attach -t \$SESSION"
+echo "   Logs:    tmux attach -t \$SESSION"
+echo "   Status:  nastech-status"
+STARTEOF
+
+cat > "$HOME_DIR/nastech-stop.sh" << 'STOPEOF'
+#!/data/data/com.termux/files/usr/bin/bash
+# NasTech Guardian Bot — Stop
+SESSION="nastech-guardian"
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  tmux kill-session -t "$SESSION"
+  echo "✅ NasTech Guardian stopped"
+else
+  echo "⚠️  Bot not running"
+fi
+STOPEOF
+
+cat > "$HOME_DIR/nastech-status.sh" << 'STATUSEOF'
+#!/data/data/com.termux/files/usr/bin/bash
+# NasTech Guardian Bot — Status
+source "$HOME/.nastech_env" 2>/dev/null || true
+SESSION="nastech-guardian"
+echo "🛡️  NasTech Guardian Status"
+echo ""
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "  Bot:    ✅ RUNNING (tmux: $SESSION)"
+else
+  echo "  Bot:    ❌ STOPPED"
+fi
+echo "  Repo:   ${GITHUB_REPO:-not set}"
+echo "  TG_BOT: ${TELEGRAM_BOT_TOKEN:+✅ set}${TELEGRAM_BOT_TOKEN:-❌ not set}"
+echo "  GROQ:   ${GROQ_API_KEY:+✅ set}${GROQ_API_KEY:-❌ not set}"
+echo "  Gemini: ${GEMINI_API_KEY:+✅ set}${GEMINI_API_KEY:-❌ not set}"
+echo ""
+echo "  Commands: nastech-start | nastech-stop | nastech-logs"
+STATUSEOF
+
+cat > "$HOME_DIR/nastech-logs.sh" << 'LOGSEOF'
+#!/data/data/com.termux/files/usr/bin/bash
+SESSION="nastech-guardian"
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "📋 Attaching to bot session (Ctrl+B then D to detach)..."
+  tmux attach -t "$SESSION"
+else
+  echo "❌ Bot not running. Start with: nastech-start"
+fi
+LOGSEOF
+
+cat > "$HOME_DIR/nastech-restart.sh" << 'RESTARTEOF'
+#!/data/data/com.termux/files/usr/bin/bash
+bash ~/nastech-stop.sh
+sleep 2
+bash ~/nastech-start.sh
+RESTARTEOF
+
+chmod +x "$HOME_DIR/nastech-start.sh" "$HOME_DIR/nastech-stop.sh" \
+         "$HOME_DIR/nastech-status.sh" "$HOME_DIR/nastech-logs.sh" \
+         "$HOME_DIR/nastech-restart.sh"
+
+# Add aliases
+for profile in "$HOME_DIR/.bashrc" "$HOME_DIR/.bash_aliases"; do
+  if ! grep -q "nastech-start" "$profile" 2>/dev/null; then
+    cat >> "$profile" << 'ALIASEOF'
+
+# NasTech Guardian aliases
+alias nastech-start='bash ~/nastech-start.sh'
+alias nastech-stop='bash ~/nastech-stop.sh'
+alias nastech-status='bash ~/nastech-status.sh'
+alias nastech-logs='bash ~/nastech-logs.sh'
+alias nastech-restart='bash ~/nastech-restart.sh'
+alias nastech-edit='nano ~/.nastech_env'
+ALIASEOF
+    log "Aliases added to $(basename $profile)"
+    break
+  fi
+done
+log "Control scripts created"
+
+# ── Step 8: Termux Boot auto-start ─────────────────────────────────
+if $TERMUX_MODE; then
+  info "Setting up Termux Boot auto-start..."
+  mkdir -p "$BOOT_DIR"
+  cat > "$BOOT_DIR/start-nastech.sh" << BOOTEOF
+#!/data/data/com.termux/files/usr/bin/bash
+# Auto-start NasTech Guardian on Termux boot
+# Requires: Termux:Boot app from F-Droid
+sleep 10  # Wait for network
+source "\$HOME/.nastech_env" 2>/dev/null || true
+INSTALL_DIR="\${NASTECH_INSTALL_DIR:-$INSTALL_DIR}"
+termux-wake-lock 2>/dev/null || true
+SESSION="nastech-guardian"
+tmux new-session -d -s "\$SESSION" -x 220 -y 50 2>/dev/null || true
+tmux send-keys -t "\$SESSION" "source ~/.nastech_env && cd '\$INSTALL_DIR' && python3 scripts/telegram_bot/nastech_guardian_bot.py" Enter
+BOOTEOF
+  chmod +x "$BOOT_DIR/start-nastech.sh"
+  log "Termux Boot script created: $BOOT_DIR/start-nastech.sh"
+  warn "Install 'Termux:Boot' from F-Droid for auto-start on device boot"
+fi
+
+# ── Step 9: Set up termux-services (runit) ──────────────────────────
+if $TERMUX_MODE; then
+  info "Checking termux-services..."
+  if pkg install -y termux-services 2>/dev/null; then
+    SVCDIR="$PREFIX/var/service/nastech-guardian"
+    mkdir -p "$SVCDIR"
+    cat > "$SVCDIR/run" << SVCEOF
+#!/data/data/com.termux/files/usr/bin/sh
+source "\$HOME/.nastech_env" 2>/dev/null || true
+exec python3 "$INSTALL_DIR/scripts/telegram_bot/nastech_guardian_bot.py" 2>&1
+SVCEOF
+    chmod +x "$SVCDIR/run"
+    mkdir -p "$SVCDIR/log"
+    cat > "$SVCDIR/log/run" << 'LOGEOF'
+#!/data/data/com.termux/files/usr/bin/sh
+exec svlogger "$SVDIR"
+LOGEOF
+    chmod +x "$SVCDIR/log/run"
+    log "termux-services service created at $SVCDIR"
+    info "Enable with: sv-enable nastech-guardian && sv up nastech-guardian"
+  else
+    warn "termux-services not available — using tmux instead"
+  fi
+fi
+
+# ── Step 10: Install Tesseract for OCR ──────────────────────────────
+info "Installing OCR support (tesseract)..."
+if $TERMUX_MODE; then
+  pkg install -y tesseract 2>/dev/null && log "tesseract installed" || warn "tesseract not available (OCR will use AI fallback)"
+else
+  apt-get install -y tesseract-ocr 2>/dev/null && log "tesseract installed" || warn "tesseract skip"
+fi
+
+# ── Step 11: Install yt-dlp for YouTube ─────────────────────────────
+info "Installing yt-dlp for media commands..."
+pip install --quiet yt-dlp 2>/dev/null && log "yt-dlp installed" || warn "yt-dlp failed (skip)"
+
+# ── Step 12: Verify installation ────────────────────────────────────
+echo ""
+echo -e "${BOLD}=== Verification ===${NC}"
+python3 -c "import telegram; print('✅ python-telegram-bot:', telegram.__version__)" 2>/dev/null || err "python-telegram-bot MISSING"
+python3 -c "import requests; print('✅ requests OK')" 2>/dev/null || err "requests MISSING"
+python3 -c "import apscheduler; print('✅ apscheduler OK')" 2>/dev/null || err "apscheduler MISSING"
+command -v tmux &>/dev/null && echo "✅ tmux: $(tmux -V)" || err "tmux MISSING"
+command -v git  &>/dev/null && echo "✅ git: $(git --version | head -1)" || err "git MISSING"
+
+# ── Done ─────────────────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}${GREEN}╔═══════════════════════════════════════════════╗${NC}"
+echo -e "${BOLD}${GREEN}║   ✅  Installation Complete!                   ║${NC}"
+echo -e "${BOLD}${GREEN}╚═══════════════════════════════════════════════╝${NC}"
+echo ""
+echo "  📁  Install dir:  $INSTALL_DIR"
+echo "  🔑  Env file:     $ENV_FILE"
+echo ""
+echo -e "${BOLD}Quick Commands:${NC}"
+echo "  nastech-start   → Start the bot"
+echo "  nastech-stop    → Stop the bot"
+echo "  nastech-status  → Check status"
+echo "  nastech-logs    → View live logs"
+echo "  nastech-restart → Restart bot"
+echo "  nastech-edit    → Edit API keys"
+echo ""
+
+if $TERMUX_MODE; then
+  echo -e "${YELLOW}📱 Termux Tips:${NC}"
+  echo "  1. Install Termux:Boot from F-Droid for auto-start on device boot"
+  echo "  2. Disable battery optimization for Termux in Android Settings"
+  echo "  3. Run 'termux-wake-lock' to prevent sleep during testing"
+  echo "  4. Keep Termux in the background — bot runs in tmux session"
+  echo ""
+fi
+
+echo -e "${BOLD}Start the bot now?${NC} (y/N)"
+read -r answer
+if [[ "${answer,,}" == "y" ]]; then
+  source "$ENV_FILE" 2>/dev/null || true
+  bash "$HOME_DIR/nastech-start.sh"
+fi
