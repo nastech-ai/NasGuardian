@@ -1,0 +1,221 @@
+name: NasGuardian Audit — Python Code & Security Scan
+
+on:
+  push:
+    branches: [ main, master ]
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  security-events: write
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # PYTHON SYNTAX & LINT
+  # ────────────────────────────────────────────────────────────────
+  python-audit:
+    name: Python Syntax & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install audit tools
+        run: pip install pyflakes bandit --quiet
+
+      - name: Syntax check — all Python files
+        shell: bash
+        run: |
+          echo "# Python Syntax Audit — $(date -u)" > audit_report.md
+          FAIL=0
+          echo "## Syntax Check" >> audit_report.md
+          while IFS= read -r f; do
+            if python3 -m py_compile "$f" 2>&1; then
+              echo "  ✅ $f" >> audit_report.md
+            else
+              echo "  ❌ $f — syntax error" >> audit_report.md
+              FAIL=1
+            fi
+          done < <(find . -name "*.py" \
+            -not -path "./.git/*" \
+            -not -path "*/__pycache__/*" \
+            -not -path "*/\.*")
+          cat audit_report.md
+          exit $FAIL
+
+      - name: Pyflakes unused import check
+        shell: bash
+        run: |
+          echo "## Pyflakes Report" >> audit_report.md
+          python3 -m pyflakes scripts/ 2>&1 | tee -a audit_report.md || true
+
+      - name: Bandit security scan
+        shell: bash
+        run: |
+          echo "## Bandit Security Scan" >> audit_report.md
+          bandit -r scripts/ -ll -f txt 2>&1 | tee -a audit_report.md || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: python-audit-report
+          path: audit_report.md
+
+  # ────────────────────────────────────────────────────────────────
+  # DEPENDENCY AUDIT
+  # ────────────────────────────────────────────────────────────────
+  dep-audit:
+    name: Python Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pip-audit
+        run: pip install pip-audit --quiet
+
+      - name: Audit bot requirements
+        shell: bash
+        run: |
+          echo "# Dependency Security Audit" > dep_report.md
+          FAIL=0
+          for req in scripts/telegram_bot/requirements.txt scripts/guardian/requirements.txt; do
+            if [ -f "$req" ]; then
+              echo "## $req" >> dep_report.md
+              pip install -r "$req" --quiet 2>/dev/null || true
+              pip-audit -r "$req" --format=markdown 2>&1 >> dep_report.md || true
+            fi
+          done
+          cat dep_report.md
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dep-audit-report
+          path: dep_report.md
+
+  # ────────────────────────────────────────────────────────────────
+  # PACKAGING AUDIT (Python / Shell — not Android)
+  # ────────────────────────────────────────────────────────────────
+  packaging-audit:
+    name: Packaging & Release Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check bundle & installer
+        shell: bash
+        run: |
+          echo "# Packaging & Release Audit" > packaging_report.md
+          FAIL=0
+
+          echo "## Required Files" >> packaging_report.md
+          for f in \
+            scripts/termux_install.sh \
+            scripts/telegram_bot/nastech_guardian_bot.py \
+            scripts/telegram_bot/requirements.txt \
+            scripts/telegram_bot/run_bot.sh \
+            scripts/guardian/ai_coordinator.py \
+            scripts/guardian/repo_manager.py \
+            scripts/create_bundle.sh; do
+            if [ -f "$f" ]; then
+              echo "  ✅ $f" >> packaging_report.md
+            else
+              echo "  ❌ MISSING: $f" >> packaging_report.md
+              FAIL=1
+            fi
+          done
+
+          echo "## Workflow Files" >> packaging_report.md
+          for wf in \
+            .github/workflows/nasguardian_audit.yml \
+            .github/workflows/nasguardian_guardian.yml \
+            .github/workflows/nastech_bot.yml; do
+            if [ -f "$wf" ]; then
+              echo "  ✅ $wf" >> packaging_report.md
+            else
+              echo "  ⚠️  $wf missing" >> packaging_report.md
+            fi
+          done
+
+          echo "## Shell Script Validation" >> packaging_report.md
+          for sh in scripts/termux_install.sh scripts/create_bundle.sh \
+                    scripts/telegram_bot/run_bot.sh; do
+            if [ -f "$sh" ]; then
+              if bash -n "$sh" 2>&1; then
+                echo "  ✅ $sh — syntax OK" >> packaging_report.md
+              else
+                echo "  ❌ $sh — syntax error" >> packaging_report.md
+                FAIL=1
+              fi
+            fi
+          done
+
+          echo "## ZIP Bundle" >> packaging_report.md
+          if ls nastech-guardian-v*.zip &>/dev/null; then
+            SIZE=$(du -sh nastech-guardian-v*.zip | cut -f1)
+            echo "  ✅ Bundle present ($SIZE)" >> packaging_report.md
+          else
+            echo "  ⚠️  No ZIP bundle found (run create_bundle.sh to generate)" >> packaging_report.md
+          fi
+
+          cat packaging_report.md
+          exit $FAIL
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: packaging-report
+          path: packaging_report.md
+
+  # ────────────────────────────────────────────────────────────────
+  # ENV VARIABLE AUDIT
+  # ────────────────────────────────────────────────────────────────
+  env-audit:
+    name: Environment Variable Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan required secrets
+        shell: bash
+        run: |
+          echo "# Environment Variable Audit" > env_report.md
+
+          echo "## Secrets Used in Workflows" >> env_report.md
+          grep -rh "secrets\." .github/workflows/ 2>/dev/null \
+            | grep -oE 'secrets\.[A-Z_]+' | sort -u >> env_report.md || true
+
+          echo "## Required Secrets" >> env_report.md
+          cat >> env_report.md << 'EOF'
+          - TELEGRAM_BOT_TOKEN   — Telegram bot API token
+          - TELEGRAM_CHAT_ID     — Telegram chat/group ID
+          - GROQ_API_KEY         — Groq (primary AI)
+          - GEMINI_API_KEY       — Gemini 2.0 Flash (fallback AI)
+          - OPENROUTER_API_KEY   — OpenRouter (fallback AI)
+          EOF
+
+          echo "## Secrets Presence Check" >> env_report.md
+          for s in TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID \
+                   GROQ_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY; do
+            if [ -n "${!s:-}" ]; then
+              echo "  ✅ $s — set" >> env_report.md
+            else
+              echo "  ⚠️  $s — not set in this runner environment" >> env_report.md
+            fi
+          done
+
+          cat env_report.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: env-audit-report
+          path: env_report.md
