@@ -373,7 +373,8 @@ _KB_PIPELINE = [
     ["📊 Pipeline Status", "🔍 Full Scan",     "🏗️ Build"],
     ["🔄 Rebuild",         "🧪 Run Tests",     "🔧 Repair Bot"],
     ["🚀 Release",         "❤️ Health Check",  "🩺 Doctor Scan"],
-    ["📋 Workflow Logs",   "❌ Recent Errors", "⚡ Quick Fix"],
+    ["📋 Workflow Logs",   "❌ Recent Errors", "📤 Error Screenshot"],
+    ["🔧 Auto Fix",        "✅ Approve Fix",   "❌ Cancel Fix"],
     ["📈 Metrics",         "🏷️ App Version",  "🔄 Trigger CI"],
     ["🏠 Main Menu"],
 ]
@@ -2356,8 +2357,8 @@ async def handle_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
         }
         fn = _CMD_FN_MAP.get(cmd)
         if fn:
-            if arg and cmd in ("/repo",):
-                ctx.args = [arg]
+            if arg:
+                ctx.args = [arg]   # pass button arg to handler for ALL commands
             await fn(u, ctx)
             return
 
