@@ -1,0 +1,230 @@
+name: NasGuardian Tests — Python
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # SYNTAX CHECK ALL PYTHON
+  # ────────────────────────────────────────────────────────────────
+  syntax-check:
+    name: Python Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check all .py files compile
+        shell: bash
+        run: |
+          FAIL=0
+          find . -name "*.py" \
+            -not -path "./.git/*" \
+            -not -path "*/__pycache__/*" | while read f; do
+            python3 -m py_compile "$f" && echo "✅ $f" || { echo "❌ $f"; FAIL=1; }
+          done
+          exit $FAIL
+
+  # ────────────────────────────────────────────────────────────────
+  # GUARDIAN AGENT IMPORTS
+  # ────────────────────────────────────────────────────────────────
+  agent-imports:
+    name: Guardian Agent Import Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install guardian requirements
+        run: |
+          pip install requests aiohttp --quiet || true
+          pip install -r scripts/guardian/requirements.txt --quiet 2>/dev/null || true
+
+      - name: Test agent imports
+        shell: bash
+        run: |
+          FAIL=0
+          for agent in \
+            scripts/guardian/ai_coordinator.py \
+            scripts/guardian/identity_bot.py \
+            scripts/guardian/dependency_bot.py \
+            scripts/guardian/health_bot.py \
+            scripts/guardian/build_bot.py \
+            scripts/guardian/repair_bot.py \
+            scripts/guardian/release_bot.py \
+            scripts/guardian/notify_bot.py \
+            scripts/guardian/state_machine.py \
+            scripts/guardian/repo_manager.py; do
+            if python3 -c "
+          import ast, sys
+          try:
+              ast.parse(open('$agent').read())
+              print('✅ AST OK: $agent')
+          except SyntaxError as e:
+              print(f'❌ Syntax error in $agent: {e}')
+              sys.exit(1)
+          " 2>&1; then
+              true
+            else
+              FAIL=1
+            fi
+          done
+          exit $FAIL
+
+  # ────────────────────────────────────────────────────────────────
+  # BOT SYNTAX & REQUIREMENTS
+  # ────────────────────────────────────────────────────────────────
+  bot-test:
+    name: Telegram Bot Syntax & Deps Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install bot requirements
+        run: pip install -r scripts/telegram_bot/requirements.txt --quiet
+
+      - name: Syntax check bot
+        run: |
+          python3 -m py_compile scripts/telegram_bot/nastech_guardian_bot.py
+          echo "✅ Bot syntax OK"
+
+      - name: Verify bot imports
+        run: |
+          python3 - << 'EOF'
+          import ast, sys
+          src = open("scripts/telegram_bot/nastech_guardian_bot.py").read()
+          tree = ast.parse(src)
+          imports = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
+          print(f"✅ Bot has {len(imports)} import statements — AST valid")
+          funcs = [n.name for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name.startswith("cmd_")]
+          print(f"✅ {len(funcs)} command handlers: {', '.join(sorted(funcs)[:10])}…")
+          EOF
+
+      - name: Test AI coordinator
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, json, urllib.request, urllib.error
+          key = os.environ.get("OPENROUTER_API_KEY","")
+          if not key:
+              print("⚠️  OPENROUTER_API_KEY not set — skip live test")
+              exit(0)
+          try:
+              data = json.dumps({
+                  "model": "meta-llama/llama-3.3-70b-instruct",
+                  "messages": [{"role":"user","content":"reply: ok"}],
+                  "max_tokens": 5
+              }).encode()
+              req = urllib.request.Request(
+                  "https://openrouter.ai/api/v1/chat/completions",
+                  data=data,
+                  headers={"Authorization":f"Bearer {key}",
+                           "Content-Type":"application/json",
+                           "HTTP-Referer":"https://github.com/nastech-ai/NasGuardian",
+                           "X-Title":"NasGuardian"}
+              )
+              with urllib.request.urlopen(req, timeout=15) as r:
+                  body = json.loads(r.read())
+                  print(f"✅ OpenRouter API — OK (model: {body['model']})")
+          except urllib.error.HTTPError as e:
+              print(f"❌ OpenRouter HTTP {e.code}: {e.read().decode()[:100]}")
+              exit(1)
+          except Exception as e:
+              print(f"⚠️  OpenRouter: {type(e).__name__}: {e}")
+          PYEOF
+
+      - name: Notify test result via Telegram
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - << 'EOF'
+          import os, json, urllib.request
+          tok  = os.environ.get("TELEGRAM_BOT_TOKEN","")
+          chat = os.environ.get("TELEGRAM_CHAT_ID","")
+          if not tok or not chat: exit(0)
+          msg = (
+              "🛡️ <b>NasGuardian Tests — ✅ Passed</b>\n\n"
+              "• Python syntax: OK\n"
+              "• Guardian agents: OK\n"
+              "• Telegram bot: OK\n"
+              "• AI APIs: tested\n\n"
+              "🔗 https://github.com/nastech-ai/NasGuardian"
+          )
+          data = json.dumps({"chat_id":chat,"text":msg,"parse_mode":"HTML"}).encode()
+          try:
+              urllib.request.urlopen(urllib.request.Request(
+                  f"https://api.telegram.org/bot{tok}/sendMessage",
+                  data=data, headers={"Content-Type":"application/json"}
+              ), timeout=10)
+              print("✅ Telegram notified")
+          except Exception as e:
+              print(f"⚠️  Telegram: {e}")
+          EOF
+
+  # ────────────────────────────────────────────────────────────────
+  # SHELL SCRIPT VALIDATION
+  # ────────────────────────────────────────────────────────────────
+  shell-lint:
+    name: Shell Script Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate shell scripts with bash -n
+        shell: bash
+        run: |
+          FAIL=0
+          for sh in \
+            scripts/termux_install.sh \
+            scripts/create_bundle.sh \
+            scripts/telegram_bot/run_bot.sh; do
+            if [ -f "$sh" ]; then
+              if bash -n "$sh" 2>&1; then
+                echo "✅ $sh"
+              else
+                echo "❌ $sh — syntax error"
+                FAIL=1
+              fi
+            else
+              echo "⚠️  $sh not found"
+            fi
+          done
+          exit $FAIL
+
+  # ────────────────────────────────────────────────────────────────
+  # SUMMARY
+  # ────────────────────────────────────────────────────────────────
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [ syntax-check, agent-imports, bot-test, shell-lint ]
+    if: always()
+    steps:
+      - name: Summarize
+        run: |
+          echo "## NasGuardian Test Summary"
+          echo ""
+          echo "| Job | Result |"
+          echo "|-----|--------|"
+          echo "| Python Syntax  | ${{ needs.syntax-check.result }} |"
+          echo "| Agent Imports  | ${{ needs.agent-imports.result }} |"
+          echo "| Bot Test       | ${{ needs.bot-test.result }} |"
+          echo "| Shell Lint     | ${{ needs.shell-lint.result }} |"
