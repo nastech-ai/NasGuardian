@@ -34,7 +34,8 @@ from typing import Optional
 try:
     from telegram import (
         Update, InlineKeyboardButton, InlineKeyboardMarkup,
-        BotCommand, BotCommandScopeDefault
+        BotCommand, BotCommandScopeDefault,
+        ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
     )
     from telegram.ext import (
         Application, CommandHandler, CallbackQueryHandler,
@@ -329,6 +330,333 @@ def fmt_ai(result: dict) -> str:
     return f"{text}\n\n<i>via {provider}</i>"
 
 
+# ═════════════════════════════════════════════════════════════════════
+# REPLY KEYBOARD SYSTEM  — 100 buttons in 9 categories
+# ═════════════════════════════════════════════════════════════════════
+
+# ── Keyboard layouts ──────────────────────────────────────────────────
+_KB_MAIN = [
+    ["🤖 AI Chat",       "📊 Pipeline",      "🔍 Repos"],
+    ["🛠️ Tools",         "🔑 API Keys",      "📱 Android"],
+    ["🚀 Workflows",     "📋 Reports",       "🔒 Security"],
+    ["📅 Daily Digest",  "⚙️ Settings",      "❓ Help"],
+]
+
+_KB_AI = [
+    ["💬 Ask AI",         "📝 Code Review",   "🔍 Explain Code"],
+    ["🐛 Fix Error",      "💻 Run Python",    "✨ Refactor Code"],
+    ["📖 Summarize",      "🌐 Translate",     "📸 OCR Image"],
+    ["🧠 AI Memory",      "🤖 AI On",         "🔇 AI Off"],
+    ["🗑️ Clear History",  "🤖 Model Status",  "📡 AI Providers"],
+    ["🏠 Main Menu"],
+]
+
+_KB_PIPELINE = [
+    ["📊 Pipeline Status", "🔍 Full Scan",     "🏗️ Build"],
+    ["🔄 Rebuild",         "🧪 Run Tests",     "🔧 Repair Bot"],
+    ["🚀 Release",         "❤️ Health Check",  "🩺 Doctor Scan"],
+    ["📋 Workflow Logs",   "❌ Recent Errors", "⚡ Quick Fix"],
+    ["📈 Metrics",         "🏷️ App Version",  "🔄 Trigger CI"],
+    ["🏠 Main Menu"],
+]
+
+_KB_REPOS = [
+    ["📁 My Repos",      "➕ Add Repo",      "📊 Repo Dashboard"],
+    ["🔍 Audit Repo",    "📝 Fix Plan",      "🔄 Scan All Repos"],
+    ["🔀 Switch Repo",   "❌ Remove Repo",   "🌿 Branches"],
+    ["📌 Commits",       "🔀 Pull Requests", "⚠️ Open Issues"],
+    ["🔒 Repo Security", "📦 Dependencies",  "📋 Repo Packages"],
+    ["🏠 Main Menu"],
+]
+
+_KB_TOOLS = [
+    ["📸 OCR Image",    "📖 Summarize Text", "🌐 Translate"],
+    ["💻 Run Python",   "🔍 Explain Code",   "📝 Code Review"],
+    ["📦 Dependencies", "🗂️ Packages",       "🔒 Security Scan"],
+    ["📊 Storage Info", "🌐 Services",       "📈 System Metrics"],
+    ["🧹 Clear Chat",   "🔍 Search Code",    "📋 Code Snippets"],
+    ["🏠 Main Menu"],
+]
+
+_KB_KEYS = [
+    ["🔑 View API Keys",    "🧪 Test All Keys",   "💾 Key Backup"],
+    ["🔧 Set Groq Key",     "🔧 Set Gemini Key",  "🔧 Set OpenRouter"],
+    ["🔧 Set TG Token",     "🔧 Set TG Chat ID",  "🔧 Set GitHub PAT"],
+    ["🔒 Key Security",     "🔄 Reload Keys",     "📋 Key Status"],
+    ["🏠 Main Menu"],
+]
+
+_KB_ANDROID = [
+    ["📱 Install Termux",  "📦 Create Bundle",   "🔄 Update Guardian"],
+    ["🚀 Start Bot",       "📋 Bot Logs",        "🛑 Stop Bot"],
+    ["⚙️ Config Keys",     "🛡️ Guardian Status", "📲 Termux Setup"],
+    ["🔗 NasGuardian",     "🔗 NasTerminal",     "📋 Boot Config"],
+    ["📥 Download ZIP",    "🔄 Reinstall Bot",   "🔍 Check Deps"],
+    ["🏠 Main Menu"],
+]
+
+_KB_WORKFLOWS = [
+    ["🚀 Trigger Build",   "🧪 Trigger Tests",   "📋 List Workflows"],
+    ["🔍 Workflow Runs",   "📊 Run Status",      "❌ Failed Runs"],
+    ["🔀 Open PRs",        "⚠️ Open Issues",     "📌 Recent Commits"],
+    ["🌿 All Branches",    "🏷️ App Version",     "📦 Latest Release"],
+    ["🔄 Sync Repo",       "⚡ Fast Build",      "🏗️ Full Build"],
+    ["🏠 Main Menu"],
+]
+
+_KB_REPORTS = [
+    ["📊 Full Report",     "📅 Daily Digest",    "📈 Pipeline Stats"],
+    ["📅 Subscribe Daily", "🔕 Unsubscribe",     "📋 Full Help"],
+    ["ℹ️ About Guardian",  "💾 Backup Status",   "🧠 Bot Memory"],
+    ["🤖 AI Providers",    "📊 Model Status",    "🌐 Network Status"],
+    ["🏆 All Commands",    "📋 Command List",    "🔄 Refresh Status"],
+    ["🏠 Main Menu"],
+]
+
+_KB_SECURITY = [
+    ["🔒 Security Scan",  "🛡️ Full Audit",     "🔍 Scan Secrets"],
+    ["⚠️ Vulnerabilities","🔧 Security Fix",   "📋 Audit Report"],
+    ["🔑 API Key Check",  "🔒 Repo Perms",     "🛡️ Code Review"],
+    ["📊 Security Score", "🔍 Dep Audit",      "⚡ Quick Audit"],
+    ["🔄 Rescan Now",     "📤 Export Report",  "🔒 Lock Down"],
+    ["🏠 Main Menu"],
+]
+
+_KB_SETTINGS = [
+    ["🔑 API Keys",        "🤖 AI Models",      "📊 Bot Status"],
+    ["🤖 AI On",           "🔇 AI Off",         "🗑️ Clear History"],
+    ["💾 Backup Info",     "🧠 Bot Memory",     "📋 All Commands"],
+    ["🔄 Restart Bot",     "⚙️ Preferences",   "📡 Connection Test"],
+    ["🏠 Main Menu"],
+]
+
+# ── Label → keyboard mapping ──────────────────────────────────────────
+_CATEGORY_KEYBOARDS: dict = {
+    "🤖 AI Chat":       _KB_AI,
+    "📊 Pipeline":      _KB_PIPELINE,
+    "🔍 Repos":         _KB_REPOS,
+    "🛠️ Tools":         _KB_TOOLS,
+    "🔑 API Keys":      _KB_KEYS,
+    "📱 Android":       _KB_ANDROID,
+    "🚀 Workflows":     _KB_WORKFLOWS,
+    "📋 Reports":       _KB_REPORTS,
+    "🔒 Security":      _KB_SECURITY,
+    "⚙️ Settings":      _KB_SETTINGS,
+    "🏠 Main Menu":     _KB_MAIN,
+}
+
+# ── Button label → (command_text, description) ────────────────────────
+_BUTTON_COMMANDS: dict = {
+    # AI
+    "💬 Ask AI":            ("/ask",          None),
+    "📝 Code Review":       ("/review",       None),
+    "🔍 Explain Code":      ("/explain",      None),
+    "🐛 Fix Error":         ("/fix_error",    None),
+    "💻 Run Python":        ("/run",          None),
+    "✨ Refactor Code":     ("/ask",          "Refactor the following code for clarity and performance:"),
+    "📖 Summarize Text":    ("/summarize",    None),
+    "📖 Summarize":         ("/summarize",    None),
+    "🌐 Translate":         ("/translate",    None),
+    "📸 OCR Image":         ("/ask",          "Send me an image and I'll extract the text with OCR."),
+    "🤖 AI On":             ("/ai_on",        None),
+    "🔇 AI Off":            ("/ai_off",       None),
+    "🗑️ Clear History":     ("/clear",        None),
+    "🧠 AI Memory":         ("/memory",       None),
+    "🤖 Model Status":      ("/models",       None),
+    "📡 AI Providers":      ("/providers",    None),
+    # Pipeline
+    "📊 Pipeline Status":   ("/status",       None),
+    "📊 Pipeline":          ("/status",       None),
+    "🔍 Full Scan":         ("/scan",         None),
+    "🏗️ Build":             ("/build",        None),
+    "🔄 Rebuild":           ("/rebuild",      None),
+    "🧪 Run Tests":         ("/test",         None),
+    "🔧 Repair Bot":        ("/repair",       None),
+    "🚀 Release":           ("/release",      None),
+    "❤️ Health Check":      ("/health",       None),
+    "🩺 Doctor Scan":       ("/doctor",       None),
+    "📋 Workflow Logs":     ("/logs",         None),
+    "❌ Recent Errors":     ("/errors",       None),
+    "⚡ Quick Fix":         ("/fix",          None),
+    "📈 Metrics":           ("/metrics",      None),
+    "🏷️ App Version":       ("/version",      None),
+    "🔄 Trigger CI":        ("/build",        None),
+    "🚀 Trigger Build":     ("/build",        None),
+    "🧪 Trigger Tests":     ("/test",         None),
+    "⚡ Fast Build":        ("/build",        None),
+    "🏗️ Full Build":        ("/rebuild",      None),
+    # Repos
+    "📁 My Repos":          ("/repos",        None),
+    "🔍 Repos":             ("/repos",        None),
+    "➕ Add Repo":          ("/addrepo",      None),
+    "📊 Repo Dashboard":    ("/dashboard",    None),
+    "🔍 Audit Repo":        ("/audit",        None),
+    "📝 Fix Plan":          ("/fixplan",      None),
+    "🔄 Scan All Repos":    ("/scanall",      None),
+    "🔀 Switch Repo":       ("/repo",         "switch"),
+    "❌ Remove Repo":       ("/repo",         "remove"),
+    "🌿 Branches":          ("/branches",     None),
+    "🌿 All Branches":      ("/branches",     None),
+    "📌 Commits":           ("/commits",      None),
+    "📌 Recent Commits":    ("/commits",      None),
+    "🔀 Pull Requests":     ("/pr",           None),
+    "🔀 Open PRs":          ("/pr",           None),
+    "⚠️ Open Issues":       ("/issues",       None),
+    "🔒 Repo Security":     ("/security",     None),
+    "📦 Dependencies":      ("/dependencies", None),
+    "📋 Repo Packages":     ("/packages",     None),
+    "🔄 Sync Repo":         ("/repo",         None),
+    # Tools
+    "🗂️ Packages":          ("/packages",     None),
+    "🔒 Security Scan":     ("/security",     None),
+    "📊 Storage Info":      ("/storage",      None),
+    "🌐 Services":          ("/services",     None),
+    "📈 System Metrics":    ("/metrics",      None),
+    "🧹 Clear Chat":        ("/clear",        None),
+    "🔍 Search Code":       ("/ask",          "Search for this in the codebase:"),
+    "📋 Code Snippets":     ("/ask",          "Show me useful code snippets for:"),
+    # Keys
+    "🔑 View API Keys":     ("/apikeys",      None),
+    "🔑 API Keys":          ("/apikeys",      None),
+    "🧪 Test All Keys":     ("/testkeys",     None),
+    "💾 Key Backup":        ("/backup",       None),
+    "🔧 Set Groq Key":      ("/setkey",       "GROQ_API_KEY"),
+    "🔧 Set Gemini Key":    ("/setkey",       "GEMINI_API_KEY"),
+    "🔧 Set OpenRouter":    ("/setkey",       "OPENROUTER_API_KEY"),
+    "🔧 Set TG Token":      ("/setkey",       "TELEGRAM_BOT_TOKEN"),
+    "🔧 Set TG Chat ID":    ("/setkey",       "TELEGRAM_CHAT_ID"),
+    "🔧 Set GitHub PAT":    ("/setkey",       "GITHUB_TOKEN"),
+    "🔒 Key Security":      ("/apikeys",      None),
+    "🔄 Reload Keys":       ("/apikeys",      None),
+    "📋 Key Status":        ("/apikeys",      None),
+    # Android / Termux
+    "📱 Install Termux":    ("/ask",          "Show me the NasGuardian Termux install guide:\ncurl -fsSL https://raw.githubusercontent.com/nastech-ai/NasGuardian/main/install.sh | bash"),
+    "📦 Create Bundle":     ("/ask",          "How do I create the NasGuardian ZIP bundle?\nbash scripts/create_bundle.sh"),
+    "🔄 Update Guardian":   ("/ask",          "How do I update NasGuardian?\ngit -C ~/nastech-guardian pull && bash install.sh --no-prompt"),
+    "🚀 Start Bot":         ("/ask",          "Starting the NasGuardian bot. Run: bash scripts/telegram_bot/run_bot.sh"),
+    "📋 Bot Logs":          ("/logs",         None),
+    "🛑 Stop Bot":          ("/ask",          "To stop the bot: tmux kill-session -t nastech-guardian  (Termux) or Ctrl+C"),
+    "⚙️ Config Keys":       ("/apikeys",      None),
+    "🛡️ Guardian Status":   ("/status",       None),
+    "📲 Termux Setup":      ("/ask",          "Guide me through Termux setup for NasGuardian."),
+    "🔗 NasGuardian":       ("/ask",          "NasGuardian GitHub: https://github.com/nastech-ai/NasGuardian"),
+    "🔗 NasTerminal":       ("/ask",          "NasTerminal GitHub: https://github.com/nastech-ai/NasTerminal"),
+    "📋 Boot Config":       ("/ask",          "Show me how to configure Termux:Boot for auto-start."),
+    "📥 Download ZIP":      ("/ask",          "Download link: https://github.com/nastech-ai/NasGuardian/raw/main/nastech-guardian-v3.0.zip"),
+    "🔄 Reinstall Bot":     ("/ask",          "Reinstall: curl -fsSL https://raw.githubusercontent.com/nastech-ai/NasGuardian/main/install.sh | bash"),
+    "🔍 Check Deps":        ("/ask",          "Check Python dependencies: pip install -r scripts/telegram_bot/requirements.txt"),
+    # Workflows
+    "📋 List Workflows":    ("/workflows",    None),
+    "🔍 Workflow Runs":     ("/workflows",    None),
+    "📊 Run Status":        ("/status",       None),
+    "❌ Failed Runs":       ("/errors",       None),
+    "⚠️ Open Issues":       ("/issues",       None),
+    "📦 Latest Release":    ("/release",      None),
+    # Reports
+    "📊 Full Report":       ("/status",       None),
+    "📅 Daily Digest":      ("/daily",        None),
+    "📈 Pipeline Stats":    ("/metrics",      None),
+    "📅 Subscribe Daily":   ("/subscribe",    None),
+    "🔕 Unsubscribe":       ("/unsubscribe",  None),
+    "📋 Full Help":         ("/help",         None),
+    "❓ Help":              ("/help",         None),
+    "ℹ️ About Guardian":    ("/ask",          "Tell me about NasGuardian — what is it and what can it do?"),
+    "💾 Backup Status":     ("/backup",       None),
+    "🧠 Bot Memory":        ("/memory",       None),
+    "🤖 AI Providers":      ("/providers",    None),
+    "📊 Model Status":      ("/models",       None),
+    "🌐 Network Status":    ("/services",     None),
+    "🏆 All Commands":      ("/help",         None),
+    "📋 Command List":      ("/help",         None),
+    "🔄 Refresh Status":    ("/status",       None),
+    # Security
+    "🛡️ Full Audit":        ("/doctor",       None),
+    "🔍 Scan Secrets":      ("/security",     None),
+    "⚠️ Vulnerabilities":   ("/security",     None),
+    "🔧 Security Fix":      ("/fix",          None),
+    "📋 Audit Report":      ("/doctor",       None),
+    "🔑 API Key Check":     ("/testkeys",     None),
+    "🔒 Repo Perms":        ("/security",     None),
+    "🛡️ Code Review":       ("/review",       None),
+    "📊 Security Score":    ("/health",       None),
+    "🔍 Dep Audit":         ("/dependencies", None),
+    "⚡ Quick Audit":       ("/scan",         None),
+    "🔄 Rescan Now":        ("/scan",         None),
+    "📤 Export Report":     ("/doctor",       None),
+    "🔒 Lock Down":         ("/security",     None),
+    # Settings
+    "🤖 AI Models":         ("/models",       None),
+    "📊 Bot Status":        ("/memory",       None),
+    "💾 Backup Info":       ("/backup",       None),
+    "📋 All Commands":      ("/help",         None),
+    "🔄 Restart Bot":       ("/ask",          "To restart: the bot is already running. Use /clear to reset state."),
+    "⚙️ Preferences":       ("/memory",       None),
+    "📡 Connection Test":   ("/testkeys",     None),
+    "🔄 Reload Keys":       ("/apikeys",      None),
+}
+
+def make_keyboard(rows: list) -> ReplyKeyboardMarkup:
+    """Build a ReplyKeyboardMarkup from a list of row lists."""
+    keyboard = [[KeyboardButton(label) for label in row] for row in rows]
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Type a message or tap a button…"
+    )
+
+# Pre-build all keyboards
+_KEYBOARDS_BUILT: dict = {
+    "main":      make_keyboard(_KB_MAIN),
+    "ai":        make_keyboard(_KB_AI),
+    "pipeline":  make_keyboard(_KB_PIPELINE),
+    "repos":     make_keyboard(_KB_REPOS),
+    "tools":     make_keyboard(_KB_TOOLS),
+    "keys":      make_keyboard(_KB_KEYS),
+    "android":   make_keyboard(_KB_ANDROID),
+    "workflows": make_keyboard(_KB_WORKFLOWS),
+    "reports":   make_keyboard(_KB_REPORTS),
+    "security":  make_keyboard(_KB_SECURITY),
+    "settings":  make_keyboard(_KB_SETTINGS),
+}
+
+_CATEGORY_KB_MAP: dict = {
+    "🤖 AI Chat":      "ai",
+    "📊 Pipeline":     "pipeline",
+    "🔍 Repos":        "repos",
+    "🛠️ Tools":        "tools",
+    "🔑 API Keys":     "keys",
+    "📱 Android":      "android",
+    "🚀 Workflows":    "workflows",
+    "📋 Reports":      "reports",
+    "🔒 Security":     "security",
+    "⚙️ Settings":     "settings",
+    "🏠 Main Menu":    "main",
+}
+
+_CATEGORY_LABELS: dict = {
+    "🤖 AI Chat":      "🤖 AI & Chat Tools",
+    "📊 Pipeline":     "📊 CI/CD Pipeline",
+    "🔍 Repos":        "🔍 Repository Manager",
+    "🛠️ Tools":        "🛠️ Dev Tools",
+    "🔑 API Keys":     "🔑 API Keys & Secrets",
+    "📱 Android":      "📱 Android / Termux",
+    "🚀 Workflows":    "🚀 GitHub Workflows",
+    "📋 Reports":      "📋 Reports & Info",
+    "🔒 Security":     "🔒 Security & Audit",
+    "⚙️ Settings":     "⚙️ Settings",
+    "🏠 Main Menu":    "🏠 Main Menu",
+}
+
+async def show_keyboard(u: Update, name: str = "main", text: str = None):
+    """Send a message with the named reply keyboard."""
+    kb = _KEYBOARDS_BUILT.get(name, _KEYBOARDS_BUILT["main"])
+    label = next((v for k, v in _CATEGORY_LABELS.items()
+                  if _CATEGORY_KB_MAP.get(k) == name), "NasTech Guardian")
+    msg = text or f"<b>{label}</b> — tap a button or type a message:"
+    await u.message.reply_text(msg, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Command handlers
 # ─────────────────────────────────────────────────────────────────────
@@ -337,12 +665,27 @@ async def cmd_start(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(u): return await deny(u)
     cid = str(u.effective_chat.id)
     await u.message.reply_text(
-        f"🛡️ <b>NasTech Guardian Bot v{BOT_VERSION}</b>\n"
+        f"🛡️ <b>NasTech Guardian v{BOT_VERSION}</b>\n"
         f"Repo: <code>{sessions[cid]['repo']}</code>\n\n"
-        "I am your AI DevOps assistant + CI/CD orchestrator.\n"
-        "Just <b>type any message</b> to chat with AI, or use /help for all commands.",
+        "Your AI DevOps assistant + CI/CD orchestrator.\n\n"
+        "💡 <b>Tap any button below</b> — or type a message to chat with AI.\n"
+        "Use /menu to switch keyboard categories.",
+        reply_markup=_KEYBOARDS_BUILT["main"],
         parse_mode=ParseMode.HTML
     )
+
+
+async def cmd_menu(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(u): return await deny(u)
+    args = ctx.args or []
+    name = "main"
+    if args:
+        arg = args[0].lower()
+        valid = ["ai","pipeline","repos","tools","keys","android",
+                 "workflows","reports","security","settings","main"]
+        if arg in valid:
+            name = arg
+    await show_keyboard(u, name)
 
 
 async def cmd_help(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1757,11 +2100,79 @@ async def handle_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     text = u.message.text.strip()
     if text.startswith("/"):
-        return  # Let command handlers deal with it
+        return
     cid = str(u.effective_chat.id)
+
+    # ── Category button → switch keyboard ────────────────────────────
+    if text in _CATEGORY_KB_MAP:
+        kb_name = _CATEGORY_KB_MAP[text]
+        label   = _CATEGORY_LABELS.get(text, text)
+        await show_keyboard(u, kb_name,
+            text=f"<b>{label}</b>\nTap a button or type a message:")
+        return
+
+    # ── Action button → route to command ─────────────────────────────
+    if text in _BUTTON_COMMANDS:
+        cmd, arg = _BUTTON_COMMANDS[text]
+
+        # Special case: "Set X Key" buttons — prompt user for value
+        if cmd == "/setkey" and arg:
+            await u.message.reply_text(
+                f"🔑 <b>Set {arg}</b>\n\n"
+                f"Reply with the new value:\n"
+                f"<code>/setkey {arg} YOUR_VALUE_HERE</code>\n\n"
+                f"Example:\n"
+                f"<code>/setkey {arg} sk-xxxxxxxxxxxx</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        # Buttons that show info/links directly
+        if cmd == "/ask" and arg:
+            msg = await u.message.reply_text("🤔 …")
+            result = ai_chat(arg, [], sessions[cid]["repo"])
+            await msg.edit_text(truncate(fmt_ai(result), 4000), parse_mode=ParseMode.HTML)
+            return
+
+        # Route to the matching command function
+        _CMD_FN_MAP = {
+            "/ask":          cmd_ask,          "/explain":      cmd_explain,
+            "/review":       cmd_review,       "/fix_error":    cmd_fix_error,
+            "/run":          cmd_run,          "/summarize":    cmd_summarize,
+            "/translate":    cmd_translate,    "/ai_on":        cmd_ai_on,
+            "/ai_off":       cmd_ai_off,       "/clear":        cmd_clear,
+            "/memory":       cmd_memory,       "/models":       cmd_models,
+            "/providers":    cmd_models,       "/status":       cmd_status,
+            "/scan":         cmd_scan,         "/build":        cmd_build,
+            "/rebuild":      cmd_rebuild,      "/test":         cmd_test,
+            "/repair":       cmd_repair,       "/release":      cmd_release,
+            "/health":       cmd_health,       "/doctor":       cmd_doctor,
+            "/logs":         cmd_logs,         "/errors":       cmd_errors,
+            "/dependencies": cmd_dependencies, "/packages":     cmd_packages,
+            "/security":     cmd_security,     "/fix":          cmd_fix,
+            "/pr":           cmd_pr,           "/issues":       cmd_issues,
+            "/commits":      cmd_commits,      "/branches":     cmd_branches,
+            "/version":      cmd_version,      "/workflows":    cmd_workflows,
+            "/metrics":      cmd_metrics,      "/storage":      cmd_storage,
+            "/services":     cmd_services,     "/repos":        cmd_repos,
+            "/addrepo":      cmd_addrepo,      "/dashboard":    cmd_dashboard,
+            "/audit":        cmd_audit,        "/fixplan":      cmd_fixplan,
+            "/scanall":      cmd_scanall,      "/repo":         cmd_repo,
+            "/daily":        cmd_daily,        "/subscribe":    cmd_daily_subscribe,
+            "/unsubscribe":  cmd_unsubscribe,  "/help":         cmd_help,
+            "/backup":       cmd_backup,       "/apikeys":      cmd_apikeys,
+            "/testkeys":     cmd_testkeys,
+        }
+        fn = _CMD_FN_MAP.get(cmd)
+        if fn:
+            if arg and cmd in ("/repo",):
+                ctx.args = [arg]
+            await fn(u, ctx)
+            return
+
+    # ── Regular AI chat ───────────────────────────────────────────────
     if not sessions[cid]["ai_mode"]:
         return
-    # Rate limit: 2 seconds between AI requests
     now = time.time()
     if now - sessions[cid]["last_active"] < 2:
         return
@@ -1876,6 +2287,7 @@ async def post_init(app: "Application"):
         BotCommand("apikeys",     "Show all API keys (masked)"),
         BotCommand("setkey",      "Change an API key live"),
         BotCommand("testkeys",    "Test all API connections"),
+        BotCommand("menu",        "Switch keyboard category"),
     ]
     await app.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
     logger.info(f"Bot commands set ({len(commands)} commands)")
@@ -1976,6 +2388,7 @@ def main():
         ("apikeys",     cmd_apikeys),
         ("setkey",      cmd_setkey),
         ("testkeys",    cmd_testkeys),
+        ("menu",        cmd_menu),
     ]
 
     for name, handler in handlers:
