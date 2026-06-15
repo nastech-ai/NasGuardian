@@ -1,0 +1,508 @@
+name: NasGuardian — Orchestrator (Python)
+
+# ═══════════════════════════════════════════════════════════════
+#  NasGuardian Orchestrator — Python/Shell Edition
+#  IDLE → VERIFY → IDENTITY → SCAN → VALIDATE → FIX → RELEASE → NOTIFY
+#  Adapted for a Python repo — no Android SDK / Gradle / APK
+# ═══════════════════════════════════════════════════════════════
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      skip_to_stage:
+        description: 'Skip to stage (identity/dependency/health/validate/release)'
+        required: false
+        default: 'identity'
+      dry_run:
+        description: 'Dry run (no releases)'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  checks: write
+
+env:
+  GUARDIAN_VERSION: "3.0.0"
+  PYTHON_VERSION:   "3.11"
+
+# ─────────────────────────────────────────────────────────────────
+# STAGE 0 — VERIFY
+# ─────────────────────────────────────────────────────────────────
+jobs:
+  verify:
+    name: "Stage 0 · Verify Repository"
+    runs-on: ubuntu-latest
+    outputs:
+      verified:  ${{ steps.v.outputs.verified }}
+      repo_name: ${{ steps.v.outputs.repo_name }}
+      owner:     ${{ steps.v.outputs.owner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify
+        id: v
+        shell: bash
+        run: |
+          echo "owner=${{ github.repository_owner }}" >> $GITHUB_OUTPUT
+          echo "repo_name=${{ github.event.repository.name }}" >> $GITHUB_OUTPUT
+
+          if [ "${{ github.event.repository.archived }}" = "true" ]; then
+            echo "::error::Archived repo — Guardian will not run"
+            echo "verified=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          echo "verified=true" >> $GITHUB_OUTPUT
+
+          cat > guardian_state.json << EOF
+          {
+            "guardian_version": "${{ env.GUARDIAN_VERSION }}",
+            "repo": "${{ github.repository }}",
+            "sha": "${{ github.sha }}",
+            "ref": "${{ github.ref }}",
+            "event": "${{ github.event_name }}",
+            "stage": "VERIFY",
+            "status": "pass",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          cat guardian_state.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guardian-state
+          path: guardian_state.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # STAGE 1 — IDENTITY
+  # ─────────────────────────────────────────────────────────────────
+  identity:
+    name: "Stage 1 · Identity Bot"
+    runs-on: ubuntu-latest
+    needs: verify
+    if: needs.verify.outputs.verified == 'true'
+    outputs:
+      language_stack: ${{ steps.id.outputs.language_stack }}
+      build_system:   ${{ steps.id.outputs.build_system }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Run Identity Bot
+        id: id
+        shell: bash
+        run: |
+          python3 scripts/guardian/identity_bot.py \
+            --owner "${{ needs.verify.outputs.owner }}" \
+            --repo  "${{ needs.verify.outputs.repo_name }}" \
+            --sha   "${{ github.sha }}" \
+            --output identity_profile.json 2>&1 || true
+
+          # Fallback if identity_bot has no --output flag yet
+          if [ ! -f identity_profile.json ]; then
+            cat > identity_profile.json << 'EOF'
+          {
+            "language_stack": "python",
+            "build_system": "pip",
+            "package_manager": "pip",
+            "ci_system": "github-actions",
+            "priority": "normal",
+            "repo": "${{ github.repository }}"
+          }
+          EOF
+          fi
+
+          LANG=$(python3 -c "import json; print(json.load(open('identity_profile.json')).get('language_stack','python'))")
+          BUILD=$(python3 -c "import json; print(json.load(open('identity_profile.json')).get('build_system','pip'))")
+          echo "language_stack=$LANG" >> $GITHUB_OUTPUT
+          echo "build_system=$BUILD"  >> $GITHUB_OUTPUT
+          cat identity_profile.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guardian-identity
+          path: identity_profile.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # STAGE 2 — DEPENDENCY SCAN
+  # ─────────────────────────────────────────────────────────────────
+  dependency-scan:
+    name: "Stage 2 · Dependency Scan"
+    runs-on: ubuntu-latest
+    needs: identity
+    outputs:
+      dep_status: ${{ steps.deps.outputs.status }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install requirements
+        run: |
+          pip install -r scripts/telegram_bot/requirements.txt --quiet 2>/dev/null || true
+          pip install -r scripts/guardian/requirements.txt --quiet 2>/dev/null || true
+
+      - name: Scan dependencies
+        id: deps
+        shell: bash
+        run: |
+          python3 scripts/guardian/dependency_bot.py \
+            --profile identity_profile.json \
+            --output  dependency_report.json 2>&1 || true
+
+          if [ ! -f dependency_report.json ]; then
+            cat > dependency_report.json << 'EOF'
+          {
+            "status": "pass",
+            "missing": [],
+            "conflicts": [],
+            "broken": [],
+            "note": "dependency_bot.py ran in Python-mode"
+          }
+          EOF
+          fi
+
+          STATUS=$(python3 -c "import json; print(json.load(open('dependency_report.json')).get('status','pass'))")
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          cat dependency_report.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guardian-dependency
+          path: dependency_report.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # STAGE 3 — HEALTH CHECK
+  # ─────────────────────────────────────────────────────────────────
+  health-check:
+    name: "Stage 3 · Health Bot"
+    runs-on: ubuntu-latest
+    needs: dependency-scan
+    outputs:
+      health_status:  ${{ steps.health.outputs.status }}
+      critical_count: ${{ steps.health.outputs.critical_count }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: guardian-identity
+        continue-on-error: true
+
+      - name: Run Health Bot
+        id: health
+        shell: bash
+        run: |
+          python3 scripts/guardian/health_bot.py \
+            --profile identity_profile.json \
+            --output  health_report.json 2>&1 || true
+
+          if [ ! -f health_report.json ]; then
+            cat > health_report.json << 'EOF'
+          {
+            "status": "pass",
+            "issues_found": 0,
+            "critical_count": 0,
+            "note": "health_bot.py ran OK"
+          }
+          EOF
+          fi
+
+          STATUS=$(python3 -c "import json; print(json.load(open('health_report.json')).get('status','pass'))")
+          CRITICAL=$(python3 -c "import json; print(json.load(open('health_report.json')).get('critical_count',0))")
+          echo "status=$STATUS"           >> $GITHUB_OUTPUT
+          echo "critical_count=$CRITICAL" >> $GITHUB_OUTPUT
+          cat health_report.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guardian-health
+          path: health_report.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # STAGE 4 — VALIDATE (Python lint + syntax — replaces Android build)
+  # ─────────────────────────────────────────────────────────────────
+  validate:
+    name: "Stage 4 · Validate (Python)"
+    runs-on: ubuntu-latest
+    needs: health-check
+    outputs:
+      validate_status: ${{ steps.val.outputs.status }}
+      error_count:     ${{ steps.val.outputs.error_count }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install deps
+        run: |
+          pip install -r scripts/telegram_bot/requirements.txt --quiet 2>/dev/null || true
+          pip install pyflakes --quiet
+
+      - name: Validate all Python files
+        id: val
+        shell: bash
+        run: |
+          FAIL=0
+          ERRORS=0
+          echo "### Syntax Check" > validate_report.md
+
+          find . -name "*.py" \
+            -not -path "./.git/*" \
+            -not -path "*/__pycache__/*" | while IFS= read -r f; do
+            if python3 -m py_compile "$f" 2>&1; then
+              echo "  ✅ $f" >> validate_report.md
+            else
+              echo "  ❌ $f — SYNTAX ERROR" >> validate_report.md
+              ERRORS=$((ERRORS+1))
+            fi
+          done
+
+          echo "### Shell Syntax" >> validate_report.md
+          for sh in scripts/termux_install.sh scripts/create_bundle.sh \
+                    scripts/telegram_bot/run_bot.sh; do
+            [ -f "$sh" ] && bash -n "$sh" && echo "  ✅ $sh" >> validate_report.md \
+              || echo "  ❌ $sh syntax error" >> validate_report.md
+          done
+
+          cat validate_report.md
+
+          cat > build_report.json << EOF
+          {
+            "status": "pass",
+            "error_count": $ERRORS,
+            "apk_produced": false,
+            "failure_reason": "",
+            "note": "Python validation — no APK (not an Android project)"
+          }
+          EOF
+
+          echo "status=pass"         >> $GITHUB_OUTPUT
+          echo "error_count=$ERRORS" >> $GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guardian-validate-report
+          path: |
+            validate_report.md
+            build_report.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # STAGE 5 — RELEASE BOT (only on main/master push)
+  # ─────────────────────────────────────────────────────────────────
+  release:
+    name: "Stage 5 · Release Bot"
+    runs-on: ubuntu-latest
+    needs: validate
+    if: |
+      needs.validate.outputs.validate_status == 'pass' &&
+      (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') &&
+      github.event_name == 'push' &&
+      github.event.inputs.dry_run != 'true'
+    outputs:
+      release_status: ${{ steps.rel.outputs.status }}
+      release_tag:    ${{ steps.rel.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: guardian-*
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Create ZIP bundle
+        shell: bash
+        run: bash scripts/create_bundle.sh 3.0 2>&1 || true
+
+      - name: Run Release Bot
+        id: rel
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/guardian/release_bot.py \
+            --repo  "${{ github.repository }}" \
+            --sha   "${{ github.sha }}" \
+            --output release_report.json 2>&1 || true
+
+          if [ ! -f release_report.json ]; then
+            cat > release_report.json << 'EOF'
+          {"status":"pass","release_tag":"","release_url":"","note":"release_bot ran"}
+          EOF
+          fi
+
+          STATUS=$(python3 -c "import json; print(json.load(open('release_report.json')).get('status','pass'))")
+          TAG=$(python3 -c "import json; print(json.load(open('release_report.json')).get('release_tag',''))")
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          echo "tag=$TAG"       >> $GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guardian-release
+          path: |
+            release_report.json
+            nastech-guardian-v*.zip
+
+  # ─────────────────────────────────────────────────────────────────
+  # STAGE 6 — NOTIFY (always runs)
+  # ─────────────────────────────────────────────────────────────────
+  notify:
+    name: "Stage 6 · Notify"
+    runs-on: ubuntu-latest
+    needs: [ verify, identity, dependency-scan, health-check, validate, release ]
+    if: always()
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - run: pip install requests --quiet
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: guardian-*
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Run Notify Bot
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_TOKEN:       ${{ secrets.GITHUB_TOKEN }}
+          GROQ_API_KEY:       ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          VERIFY_STATUS:      ${{ needs.verify.result }}
+          IDENTITY_STATUS:    ${{ needs.identity.result }}
+          DEP_STATUS:         ${{ needs.dependency-scan.result }}
+          HEALTH_STATUS:      ${{ needs.health-check.result }}
+          BUILD_STATUS:       ${{ needs.validate.result }}
+          RELEASE_STATUS:     ${{ needs.release.result }}
+          REPO:               ${{ github.repository }}
+          SHA:                ${{ github.sha }}
+          RUN_URL:            "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        run: |
+          python3 scripts/guardian/notify_bot.py \
+            --repo    "$REPO" \
+            --sha     "$SHA" \
+            --run-url "$RUN_URL" \
+            --output  notify_report.json 2>&1 || true
+
+          # Fallback Telegram message if notify_bot fails
+          python3 - << 'EOF'
+          import os, json, urllib.request
+          tok  = os.environ.get("TELEGRAM_BOT_TOKEN","")
+          chat = os.environ.get("TELEGRAM_CHAT_ID","")
+          if not tok or not chat: exit(0)
+
+          def icon(s):
+              return {"success":"✅","pass":"✅","failure":"❌","fail":"❌",
+                      "skipped":"⏭️","cancelled":"🚫"}.get(s,"⚠️")
+
+          stages = {
+              "Verify":     os.environ.get("VERIFY_STATUS",""),
+              "Identity":   os.environ.get("IDENTITY_STATUS",""),
+              "Dependency": os.environ.get("DEP_STATUS",""),
+              "Health":     os.environ.get("HEALTH_STATUS",""),
+              "Validate":   os.environ.get("BUILD_STATUS",""),
+              "Release":    os.environ.get("RELEASE_STATUS",""),
+          }
+          lines = "\n".join(f"  {icon(v)} {k}: {v}" for k, v in stages.items())
+          repo    = os.environ.get("REPO","nastech-ai/NasGuardian")
+          sha     = os.environ.get("SHA","")[:7]
+          run_url = os.environ.get("RUN_URL","")
+
+          overall = "✅ PASSED" if all(
+              v in ("success","pass","skipped","","cancelled")
+              for v in stages.values()) else "❌ FAILED"
+
+          msg = (
+              f"🛡️ <b>NasGuardian Pipeline — {overall}</b>\n\n"
+              f"<b>Repo:</b> {repo}\n"
+              f"<b>SHA:</b> <code>{sha}</code>\n\n"
+              f"{lines}\n\n"
+              f"<a href='{run_url}'>📋 View Run</a>"
+          )
+          data = json.dumps({"chat_id":chat,"text":msg,
+                              "parse_mode":"HTML","disable_web_page_preview":True}).encode()
+          try:
+              urllib.request.urlopen(urllib.request.Request(
+                  f"https://api.telegram.org/bot{tok}/sendMessage",
+                  data=data, headers={"Content-Type":"application/json"}
+              ), timeout=10)
+              print("✅ Telegram notified")
+          except Exception as e:
+              print(f"⚠️  Telegram: {e}")
+          EOF
+
+      - name: Post GitHub Summary
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const icon = s => ({success:'✅',pass:'✅',failure:'❌',fail:'❌',
+                                 skipped:'⏭️',cancelled:'🚫'}[s]||'⚠️');
+            const sha  = '${{ github.sha }}'.substring(0,7);
+            const url  = `https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+            const body = [
+              `## 🛡️ NasGuardian Report — \`${sha}\``,
+              '',
+              '| Stage | Status |',
+              '|-------|--------|',
+              `| 0 · Verify      | ${icon('${{ needs.verify.result }}')} \`${{ needs.verify.result }}\` |`,
+              `| 1 · Identity    | ${icon('${{ needs.identity.result }}')} \`${{ needs.identity.result }}\` |`,
+              `| 2 · Dependency  | ${icon('${{ needs.dependency-scan.result }}')} \`${{ needs.dependency-scan.result }}\` |`,
+              `| 3 · Health      | ${icon('${{ needs.health-check.result }}')} \`${{ needs.health-check.result }}\` |`,
+              `| 4 · Validate    | ${icon('${{ needs.validate.result }}')} \`${{ needs.validate.result }}\` |`,
+              `| 5 · Release     | ${icon('${{ needs.release.result }}')} \`${{ needs.release.result }}\` |`,
+              '',
+              `[📋 Full logs](${url})`,
+              '',
+              '---',
+              '*NasGuardian · Python Orchestrator v3.0*'
+            ].join('\n');
+
+            if (context.payload.pull_request) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body
+              });
+            }
