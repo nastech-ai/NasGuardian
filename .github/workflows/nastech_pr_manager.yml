@@ -1,0 +1,168 @@
+name: NasTech PR Manager
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+  statuses: write
+
+jobs:
+  # ── Conventional commit title check ─────────────────────────────
+  check-title:
+    name: Check PR Title (Conventional Commits)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate title
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            build
+            ci
+            docs
+            refactor
+            perf
+            test
+            chore
+            revert
+            guardian
+          scopes: |
+            app
+            terminal
+            termux-shared
+            terminal-emulator
+            terminal-view
+            ci
+            deps
+            guardian
+            bot
+            ai
+          requireScope: false
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: |
+            The subject "{subject}" found in the pull request title "{title}"
+            must not start with an uppercase character.
+
+  # ── Task list checker ───────────────────────────────────────────
+  check-tasklist:
+    name: Check PR Task List
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - name: Check all task items are checked
+        uses: kentaro-m/task-completed-checker-action@v0.1.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Guardian PR labels ──────────────────────────────────────────
+  label-pr:
+    name: Label PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add size label
+        uses: codelytv/pr-size-labeler@v1
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          xs_max_size:  '10'
+          s_max_size:   '50'
+          m_max_size:   '200'
+          l_max_size:   '600'
+          fail_if_xl:   'false'
+          message_if_xl: |
+            This PR is very large. Consider splitting it into smaller PRs.
+
+      - name: Label by path
+        uses: actions/labeler@v5
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          configuration-path: .github/labeler.yml
+        continue-on-error: true
+
+  # ── Guardian analysis ───────────────────────────────────────────
+  guardian-pr-check:
+    name: Guardian PR Analysis
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Run dependency check on changed files
+        env:
+          GITHUB_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER:     ${{ github.event.pull_request.number }}
+          GROQ_API_KEY:  ${{ secrets.GROQ_API_KEY }}
+        run: |
+          python3 - <<'EOF'
+          import os, json, subprocess, sys
+          pr = os.environ.get("PR_NUMBER", "")
+          token = os.environ.get("GITHUB_TOKEN", "")
+          # Get changed files
+          result = subprocess.run(
+              ["git", "diff", "--name-only", "origin/main...HEAD"],
+              capture_output=True, text=True
+          )
+          changed = result.stdout.strip().split("\n")
+          gradle_changed = [f for f in changed if f.endswith(".gradle") or f.endswith(".properties")]
+          if gradle_changed:
+              print(f"📦 Gradle files changed: {gradle_changed}")
+              print("  → Dependency review required")
+          else:
+              print("✅ No Gradle dependency files changed")
+          EOF
+
+      - name: Notify Telegram on PR open
+        if: github.event.action == 'opened'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - <<'EOF'
+          import os, urllib.request, json
+          token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+          if not token or not chat_id:
+              print("Telegram not configured — skip")
+              exit(0)
+          pr_title  = "${{ github.event.pull_request.title }}"
+          pr_url    = "${{ github.event.pull_request.html_url }}"
+          pr_num    = "${{ github.event.pull_request.number }}"
+          pr_author = "${{ github.event.pull_request.user.login }}"
+          msg = (
+              f"🔀 <b>New PR #{pr_num}</b>\n"
+              f"<i>{pr_title}</i>\n"
+              f"By: @{pr_author}\n"
+              f"<a href='{pr_url}'>View PR</a>"
+          )
+          data = json.dumps({"chat_id": chat_id, "text": msg, "parse_mode": "HTML",
+                             "disable_web_page_preview": True}).encode()
+          req = urllib.request.Request(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              data=data, headers={"Content-Type": "application/json"}
+          )
+          try:
+              urllib.request.urlopen(req, timeout=10)
+              print("Telegram notification sent")
+          except Exception as e:
+              print(f"Telegram send failed: {e}")
+          EOF
