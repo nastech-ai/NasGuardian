@@ -224,7 +224,7 @@ jobs:
   notify-failure:
     name: Notify Failure
     runs-on: ubuntu-latest
-    needs: [audit, env-audit]
+    needs: [python-audit, dep-audit, packaging-audit, env-audit]
     if: failure()
     steps:
       - name: Send Telegram alert
