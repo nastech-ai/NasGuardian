@@ -1,1 +1,1 @@
-"""NasTech Guardian Telegram Bot"""
+# NasTech Guardian — Telegram bot package
